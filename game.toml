@@ -48,6 +48,9 @@ aspect_ratio = "4:3"
 
 [controller]
 default_mode = "digital"
+# First connected SDL gamepad drives player 1 (release builds default to
+# keyboard otherwise).
+p1_device = "auto"
 
 # Online mount gate: digests + track count + optional TOC fingerprint
 # (see docs/NETPLAY.md).
