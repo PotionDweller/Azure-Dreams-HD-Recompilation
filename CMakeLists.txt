@@ -45,6 +45,11 @@ psxrecomp_add_game_runtime(psx-runtime
     MAX_PLAYERS 1
     # LAUNCHER_BOXART "${CMAKE_CURRENT_SOURCE_DIR}/launcher_assets/img/boxart.tga"
     APP_ICON "${CMAKE_CURRENT_SOURCE_DIR}/assets/psxrecomp.ico"
+    # Captured overlays compiled into the exe (compile_overlays.py --static).
+    # Ignored by runtime.cmake when the file has not been generated. Must stay
+    # ABOVE GEN_FULL_GLOB: that multi-value list would otherwise swallow this
+    # keyword (psxrecomp_add_game_runtime only forwards it as an unparsed arg).
+    GAME_OVERLAY_STATIC_C "${CMAKE_CURRENT_SOURCE_DIR}/generated/overlays_static.c"
     GEN_MARKER "generated/SLUS_006.14_dispatch.c"
     GEN_FULL_GLOB "generated/SLUS_006.14_full_*.c"
     # CODEGEN_SETUP_SOURCES -- add with recomp-ui / wizard later
