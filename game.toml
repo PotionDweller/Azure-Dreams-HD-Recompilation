@@ -45,6 +45,11 @@ overlay_cache = true
 [video]
 renderer = "opengl"
 aspect_ratio = "4:3"
+# HD: render at 4x native (max), plus PGXP-style corrections. Both corrections
+# are visual-only and fall back to the faithful path on anything unproven.
+supersampling = 4
+geometry_correction = true     # sub-pixel vertices: no polygon wobble
+perspective_texturing = true   # perspective-correct UVs: no texture warping
 
 [controller]
 default_mode = "digital"
