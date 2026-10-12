@@ -54,6 +54,35 @@ perspective_texturing = true   # perspective-correct UVs: no texture warping
 # "nearest" (default, blocky) | "bilinear" (softest) | "sharp" | "bicubic"
 fmv_filter = "bicubic"
 
+# Widescreen presentation (only when the widescreen mod is enabled).
+# gte_game_mode: frames that project 3D geometry are gameplay and render
+# native-wide; full-2D screens (menus, save) and FMVs stay 4:3 pillarboxed.
+[widescreen]
+gte_game_mode = true
+
+# Widescreen culling. Inert at 4:3: every widened compare uses a margin that
+# is zero unless the (experimental, default-off) widescreen mod is enabled.
+[widescreen.cull]
+auto_screen_x = true   # widen the standard GTE screen-extent rejects
+# Azure Dreams' reject window is the biased `x+32 < 385` / `y+32 < 289`
+# (320x224 plus a 32 px margin), not the default 320/240 family. Seen in
+# func_80033D54, 800345B8, 80037714, 800453E0, 80045CC4 and overlay copies.
+# 0x1D6 (470) is NOT a width here: in func_800453E0 it bounds an object
+# countdown at obj+192, so it must stay out.
+screen_w_imms = ["0x181"]
+screen_h_imms = ["0x121"]
+# 2D sprite on-screen test (characters/monsters): biased X window
+# `sltiu x+32, 385` (= 320 + 2*32 + 1), four corners, two copies of the
+# function. The paired `sltiu y+32, 289` compares are VERTICAL and are
+# deliberately left out. Found with `psxrecomp-analyze --scan-widescreen`.
+screen_x_sites = [
+  # func_80037714 (main EXE)
+  "0x800377F0", "0x80037820", "0x80037854", "0x80037888",
+  "0x80037A90", "0x80037AC0", "0x80037AF4", "0x80037B28",
+  # func_800AFFB4 (overlay)
+  "0x800B00BC", "0x800B00EC", "0x800B0120", "0x800B0154",
+]
+
 [controller]
 default_mode = "digital"
 # First connected SDL gamepad drives player 1 (release builds default to
