@@ -1,35 +1,53 @@
-# Minimal game.toml stub for the New Project Layout.
-# With setup_project --disc <cue>, probe_disc.py overwrites this with
-# serial / EXE header / Track 01 digests / TOC fp / [netplay] gates, and writes
-# seeds/ghidra_funcs.txt (boot-EXE JAL scan).
-# Without --disc, fill by hand (or re-run probe_disc.py later).
-# See psxrecomp/docs/GAME_PROJECT_SETUP.md and docs/config_schema.md.
+# Autofilled by tools/new_project_layout/probe_disc.py from your legal dump.
+# Review before shipping. Runtime quirks / overlay seeds still need hand work.
 
 [game]
-name = "AzureDreams"
-# id = "SLUS-XXXXX"
+name = "Azure Dreams"
+id = "SLUS-00614"
 players = 1
-# exe = "disc/SLUS_01234"
-# disc = "disc/game.cue"
-# load_address = "0x80010000"
-# entry_pc = "0x800XXXXX"
-# text_size = "0x00000000"
-# stack_base = "0x801FFFF0"
+exe = "disc/SLUS_006.14"
+disc = "F:\\GameCompilations\\Games\\Azure Dreams\\Azure Dreams (USA)\\Azure Dreams (USA).cue"
+load_address = "0x8002D000"
+entry_pc = "0x80033930"
+text_size = "0x00054800"
+stack_base = "0x801FFFF0"
+
+# Digests are for data Track 01 (first BINARY FILE / TRACK 01).
+[prepare_disc]
+out_dir = "disc"
+bin_name = "Azure Dreams (USA).bin"
+cue_name = "Azure Dreams (USA).cue"
+boot_exe = "SLUS_006.14"
+known_sizes = [298576992]
+known_md5 = [
+  "9f0afe31a2993af90e43a5ff3139e331",
+]
+known_sha1 = [
+  "fab68454be5e4e48f7a43ac797cc8c47325c6a20",
+]
+known_crc32 = [
+  "7b0c5f60",
+]
 
 [recompiler]
 seeds = "seeds/ghidra_funcs.txt"
 out_dir = "generated"
 strict = true
 
-# Optional identity hashes for Generate / netplay dump checks:
-# [prepare_disc]
-# out_dir = "disc"
-# boot_exe = "SLUS_01234"
-# known_sizes = [...]
-# known_md5 = [...]
-# known_sha1 = [...]
+[runtime]
+window_title = "Azure Dreams Recompiled"
+memcard_dir = "saves"
 
-# [netplay]
-# require_cue = true
-# required_tracks = 0
-# required_disc_fp = "…"
+[video]
+renderer = "opengl"
+aspect_ratio = "4:3"
+
+[controller]
+default_mode = "digital"
+
+# Online mount gate: digests + track count + optional TOC fingerprint
+# (see docs/NETPLAY.md).
+[netplay]
+require_cue = true
+required_tracks = 1
+required_disc_fp = "f6cb0129b404c086abbb1be8bc7792bb8c43f5bdbf12bcaef0e04df3ac660013"

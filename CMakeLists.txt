@@ -15,13 +15,13 @@ project(AzureDreamsRecomp LANGUAGES C CXX)
 # Scaffold prompts / flags fill these. Without recomp-ui, PSX_RECOMP_UI is OFF.
 # Setup-host CI requires WIZARD_CMAKE_BLOCK / ENABLE_SETUP_WIZARD (FORCE_SETUP_HOST
 # alone does not open first-run / Generate & rebuild).
-﻿set(PSX_RECOMP_UI OFF CACHE BOOL
+set(PSX_RECOMP_UI OFF CACHE BOOL
     "No recomp-ui submodule in this scaffold" FORCE)
-﻿# Full netplay UI -- enable after adding recomp-ui + testing:
+# Full netplay UI -- enable after adding recomp-ui + testing:
 # if(EXISTS "${PSXRECOMP_ROOT}/lib/recomp-net/CMakeLists.txt")
 #     set(PSX_NETPLAY ON CACHE BOOL "..." FORCE)
 # endif()
-﻿# First-run setup wizard -- enable after testing:
+# First-run setup wizard -- enable after testing:
 # set(PSX_SETUP_WIZARD ON CACHE BOOL "..." FORCE)
 include("${PSXRECOMP_ROOT}/runtime/runtime.cmake")
 
@@ -43,11 +43,11 @@ psxrecomp_add_game_runtime(psx-runtime
     WINDOW_TITLE "AzureDreams Recompiled"
     DEFAULT_GAME_CONFIG_PATH "game.toml"
     MAX_PLAYERS 1
-﻿    # LAUNCHER_BOXART "${CMAKE_CURRENT_SOURCE_DIR}/launcher_assets/img/boxart.tga"
-﻿    APP_ICON "${CMAKE_CURRENT_SOURCE_DIR}/assets/psxrecomp.ico"
-    GEN_MARKER "generated/SLUS_01234_dispatch.c"
-    GEN_FULL_GLOB "generated/SLUS_01234_full_*.c"
-﻿    # CODEGEN_SETUP_SOURCES -- add with recomp-ui / wizard later
+    # LAUNCHER_BOXART "${CMAKE_CURRENT_SOURCE_DIR}/launcher_assets/img/boxart.tga"
+    APP_ICON "${CMAKE_CURRENT_SOURCE_DIR}/assets/psxrecomp.ico"
+    GEN_MARKER "generated/SLUS_006.14_dispatch.c"
+    GEN_FULL_GLOB "generated/SLUS_006.14_full_*.c"
+    # CODEGEN_SETUP_SOURCES -- add with recomp-ui / wizard later
 )
 
 # Stage runtime configs next to the exe for direct build/ launches. Only copy

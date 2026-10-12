@@ -4,7 +4,7 @@
 # See psxrecomp/docs/SYMBOLS.md.
 
 [[func]]
-pc = 0x80010000
+pc = 0x80033930
 name = "BootEntry"
 emit = false
 status = "guessed"

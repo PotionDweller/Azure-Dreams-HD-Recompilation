@@ -5,5 +5,5 @@
 #pragma once
 
 /* guessed: SYSTEM.CNF / EXE entry PC (probe seed) */
-#define PSX_FN_BootEntry 0x80010000u
-#define func_80010000 BootEntry  /* alias */
+#define PSX_FN_BootEntry 0x80033930u
+#define func_80033930 BootEntry  /* alias */
