@@ -48,6 +48,12 @@ settings.toml
 # 100 MB blob limit, and ripped disc content must never be committed at all.
 /analysis/
 
+# Overlay captures and compiled overlay cache: snapshots of game code from the
+# local disc -- never commit.
+/captures/
+/cache/
+overlay_captures.json*
+
 # Ghidra / local analysis
 /ghidra/projects/
 *.gpr

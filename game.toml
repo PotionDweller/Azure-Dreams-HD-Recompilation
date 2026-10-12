@@ -37,6 +37,10 @@ strict = true
 [runtime]
 window_title = "Azure Dreams Recompiled"
 memcard_dir = "saves"
+# Record each overlay the game runs (bytes + executed PCs) so
+# tools/compile_overlays.py can turn them into native code. Capture path is
+# set in .psxrecomp.env (captures/, gitignored -- contains game code).
+overlay_cache = true
 
 [video]
 renderer = "opengl"
