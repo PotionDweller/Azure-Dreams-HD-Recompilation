@@ -50,6 +50,9 @@ aspect_ratio = "4:3"
 supersampling = 4
 geometry_correction = true     # sub-pixel vertices: no polygon wobble
 perspective_texturing = true   # perspective-correct UVs: no texture warping
+# Upscale filter for 24-bit screens (FMVs and the title art):
+# "nearest" (default, blocky) | "bilinear" (softest) | "sharp" | "bicubic"
+fmv_filter = "sharp"
 
 [controller]
 default_mode = "digital"
