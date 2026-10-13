@@ -51,6 +51,15 @@ static const int16_t k_hud_left_stock_y[4] = { -138, -86, -138, -82 };
 #define MINIMAP_FUNC_WORD2  0x00A0B021u /* addu  s6, a1, zero */
 #define MINIMAP_STOCK_X     256
 #define MINIMAP_STOCK_Y     120
+/* The map is clipped to a window RECT in the first argument's struct: $a0+4 =
+ * {x 213, y 56, w 107, h 112} (right edge = 319, the 4:3 edge), with a copy of
+ * {x, y} at +12. The window must move with the anchor; the native-wide
+ * renderer (local psxrecomp patch) mirrors such framebuffer clip windows into
+ * the reveal strip and keeps the canonical draw inside the framebuffer. */
+#define MINIMAP_WIN_STOCK_X 213
+#define MINIMAP_WIN_STOCK_Y 56
+#define MINIMAP_WIN_STOCK_W 107
+#define MINIMAP_WIN_STOCK_H 112
 
 static void azure_widescreen_activate(void) {
     (void)psx_mod_set_fixed_display_aspect(16u, 9u);
@@ -93,12 +102,24 @@ static void azure_widescreen_minimap_entry(struct CPUState *cpu, uint32_t addres
     if (psx_mod_read_word(MINIMAP_FUNC) != MINIMAP_FUNC_WORD0 ||
         psx_mod_read_word(MINIMAP_FUNC + 8u) != MINIMAP_FUNC_WORD2)
         return;
-    const uint32_t state = cpu->gpr[5];                 /* $a1 */
-    if ((state & 0xFFE00000u) != 0x80000000u) return;   /* main RAM only */
-    if ((int16_t)psx_mod_read_half(state + 2u) != MINIMAP_STOCK_X ||
-        (int16_t)psx_mod_read_half(state + 6u) != MINIMAP_STOCK_Y)
-        return;
-    psx_mod_write_half(state + 2u, (uint16_t)(int16_t)(MINIMAP_STOCK_X + margin));
+    const uint32_t win   = cpu->gpr[4];                 /* $a0: window struct */
+    const uint32_t state = cpu->gpr[5];                 /* $a1: map state */
+    if ((win & 0xFFE00000u) != 0x80000000u ||
+        (state & 0xFFE00000u) != 0x80000000u) return;   /* main RAM only */
+
+    /* Window: shift only an exact stock RECT (and its x copy at +12). */
+    if ((int16_t)psx_mod_read_half(win + 4u)  == MINIMAP_WIN_STOCK_X &&
+        (int16_t)psx_mod_read_half(win + 6u)  == MINIMAP_WIN_STOCK_Y &&
+        (int16_t)psx_mod_read_half(win + 8u)  == MINIMAP_WIN_STOCK_W &&
+        (int16_t)psx_mod_read_half(win + 10u) == MINIMAP_WIN_STOCK_H) {
+        psx_mod_write_half(win + 4u, (uint16_t)(int16_t)(MINIMAP_WIN_STOCK_X + margin));
+        if ((int16_t)psx_mod_read_half(win + 12u) == MINIMAP_WIN_STOCK_X)
+            psx_mod_write_half(win + 12u, (uint16_t)(int16_t)(MINIMAP_WIN_STOCK_X + margin));
+    }
+    /* Map content anchor. */
+    if ((int16_t)psx_mod_read_half(state + 2u) == MINIMAP_STOCK_X &&
+        (int16_t)psx_mod_read_half(state + 6u) == MINIMAP_STOCK_Y)
+        psx_mod_write_half(state + 2u, (uint16_t)(int16_t)(MINIMAP_STOCK_X + margin));
 }
 
 PSX_MOD_CONSTRUCTOR(azure_register_widescreen_plugin) {
@@ -106,10 +127,7 @@ PSX_MOD_CONSTRUCTOR(azure_register_widescreen_plugin) {
                                              azure_widescreen_activate);
     (void)psx_mod_register_vblank_plugin("azuredreams.widescreen",
                                          azure_widescreen_vblank);
-    /* Minimap re-anchor disabled for now: the hook positions the map
-     * correctly, but the native-wide GL mirror pass never draws the minimap
-     * into the reveal strip (with gl_wide_fast off it vanishes entirely), so
-     * anything moved past the 4:3 edge is clipped. Re-enable once the
-     * renderer draws it in the margin. */
-    (void)azure_widescreen_minimap_entry;
+    (void)psx_mod_register_function_entry_plugin("azuredreams.widescreen",
+                                                 MINIMAP_FUNC,
+                                                 azure_widescreen_minimap_entry);
 }
