@@ -33,6 +33,10 @@ known_crc32 = [
 seeds = "seeds/ghidra_funcs.txt"
 out_dir = "generated"
 strict = true
+# Trusted mod hooks (src/mod_widescreen.c): dungeon minimap draw function, so
+# the widescreen mod can read its state pointer from $a1. No-op unless the
+# widescreen mod is enabled.
+mod_function_entry_funcs = ["0x8009E798"]
 
 [runtime]
 window_title = "Azure Dreams Recompiled"

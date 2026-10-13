@@ -20,20 +20,43 @@
  * sets up is left alone.
  */
 #include "mod_plugins.h"
+#include "cpu_state.h"
 
 #define CAMERA_VIEW_RECT_X 0x80083178u /* camera (0x80083160) + 24 */
 #define CAMERA_VIEW_RECT_W 0x8008317Cu /* camera + 28 */
 #define STOCK_VIEW_RECT_X  (-188)
 #define STOCK_VIEW_RECT_W  370
 
+/* Player HUD panel (LV / HP, top-left). Its sprite groups are drawn through
+ * func_8004C36C with an identity "screen" camera, positioned by a table of
+ * (x, y) anchors relative to the screen centre. In 16:9 the panel stayed at
+ * the 4:3 left edge, inset by the reveal; entry 0 is a gauge parked just
+ * off-screen that the widened view exposed. Shift every entry left by the
+ * margin so the panel hugs the wide edge and the gauge is hidden again. */
+#define HUD_LEFT_ANCHORS   0x800E2924u /* 4 x {int16 x, int16 y} */
+static const int16_t k_hud_left_stock_x[4] = { -196, -140, -90, -34 };
+static const int16_t k_hud_left_stock_y[4] = { -138, -86, -138, -82 };
+
+/* Dungeon minimap (translucent map, right of centre). func_8009E798 (dungeon
+ * overlay, reached through a function pointer) draws it; its second argument
+ * points to a heap-allocated state struct whose +2 halfword is the map's
+ * horizontal screen anchor (stock 256; +6 is the vertical, 120). Raising the
+ * anchor by the margin moves the map to the wide right edge. The struct moves
+ * between floors, so it is taken from $a1 at function entry via
+ * [recompiler] mod_function_entry_funcs. Overlays reuse addresses, so the
+ * hook first checks it is really this function (prologue words) and that the
+ * struct holds the stock layout. */
+#define MINIMAP_FUNC        0x8009E798u
+#define MINIMAP_FUNC_WORD0  0x27BDFFB8u /* addiu sp, sp, -72 */
+#define MINIMAP_FUNC_WORD2  0x00A0B021u /* addu  s6, a1, zero */
+#define MINIMAP_STOCK_X     256
+#define MINIMAP_STOCK_Y     120
+
 static void azure_widescreen_activate(void) {
     (void)psx_mod_set_fixed_display_aspect(16u, 9u);
 }
 
-static void azure_widescreen_vblank(void) {
-    if (!psx_mod_game_started()) return;
-    const int32_t margin = psx_mod_widescreen_x_margin();
-    if (margin <= 0) return;
+static void widen_view_rect(int32_t margin) {
     const int16_t x = (int16_t)psx_mod_read_half(CAMERA_VIEW_RECT_X);
     const int16_t w = (int16_t)psx_mod_read_half(CAMERA_VIEW_RECT_W);
     if (x != STOCK_VIEW_RECT_X || w != STOCK_VIEW_RECT_W) return;
@@ -41,9 +64,52 @@ static void azure_widescreen_vblank(void) {
     psx_mod_write_half(CAMERA_VIEW_RECT_W, (uint16_t)(int16_t)(STOCK_VIEW_RECT_W + 2 * margin));
 }
 
+static void anchor_left_hud(int32_t margin) {
+    /* Only an exact stock table is shifted: once shifted it no longer matches,
+     * and anything else living at this overlay address is left alone. */
+    for (int i = 0; i < 4; i++) {
+        const uint32_t a = HUD_LEFT_ANCHORS + 4u * (uint32_t)i;
+        if ((int16_t)psx_mod_read_half(a) != k_hud_left_stock_x[i] ||
+            (int16_t)psx_mod_read_half(a + 2u) != k_hud_left_stock_y[i])
+            return;
+    }
+    for (int i = 0; i < 4; i++)
+        psx_mod_write_half(HUD_LEFT_ANCHORS + 4u * (uint32_t)i,
+                           (uint16_t)(int16_t)(k_hud_left_stock_x[i] - margin));
+}
+
+static void azure_widescreen_vblank(void) {
+    if (!psx_mod_game_started()) return;
+    const int32_t margin = psx_mod_widescreen_x_margin();
+    if (margin <= 0) return;
+    widen_view_rect(margin);
+    anchor_left_hud(margin);
+}
+
+static void azure_widescreen_minimap_entry(struct CPUState *cpu, uint32_t address) {
+    (void)address;
+    const int32_t margin = psx_mod_widescreen_x_margin();
+    if (margin <= 0) return;
+    if (psx_mod_read_word(MINIMAP_FUNC) != MINIMAP_FUNC_WORD0 ||
+        psx_mod_read_word(MINIMAP_FUNC + 8u) != MINIMAP_FUNC_WORD2)
+        return;
+    const uint32_t state = cpu->gpr[5];                 /* $a1 */
+    if ((state & 0xFFE00000u) != 0x80000000u) return;   /* main RAM only */
+    if ((int16_t)psx_mod_read_half(state + 2u) != MINIMAP_STOCK_X ||
+        (int16_t)psx_mod_read_half(state + 6u) != MINIMAP_STOCK_Y)
+        return;
+    psx_mod_write_half(state + 2u, (uint16_t)(int16_t)(MINIMAP_STOCK_X + margin));
+}
+
 PSX_MOD_CONSTRUCTOR(azure_register_widescreen_plugin) {
     (void)psx_mod_register_activation_plugin("azuredreams.widescreen",
                                              azure_widescreen_activate);
     (void)psx_mod_register_vblank_plugin("azuredreams.widescreen",
                                          azure_widescreen_vblank);
+    /* Minimap re-anchor disabled for now: the hook positions the map
+     * correctly, but the native-wide GL mirror pass never draws the minimap
+     * into the reveal strip (with gl_wide_fast off it vanishes entirely), so
+     * anything moved past the 4:3 edge is clipped. Re-enable once the
+     * renderer draws it in the margin. */
+    (void)azure_widescreen_minimap_entry;
 }
