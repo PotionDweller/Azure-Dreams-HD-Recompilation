@@ -89,6 +89,10 @@ screen_x_sites = [
 
 [controller]
 default_mode = "digital"
+# Azure Dreams predates the DualShock: its pad library ignores a pad that
+# answers in analog mode (id 0x73). Lock every seat to digital, which also
+# hides the launcher's Analog/D-Pad selector.
+lock_mode = true
 # First connected SDL gamepad drives player 1 (release builds default to
 # keyboard otherwise).
 p1_device = "auto"
