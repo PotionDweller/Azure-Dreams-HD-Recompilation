@@ -6,7 +6,7 @@
 #include "psxrecomp_codegen_host.h"
 
 static const PsxrecompCodegenHostConfig kCodegenConfig = {
-    .display_name = "AzureDreams",
+    .display_name = "Azure Dreams",
     .project_root_env = "AZUREDREAMSRECOMP_PROJECT_ROOT",
     .build_dir_env = "AZUREDREAMSRECOMP_BUILD_DIR",
     .force_setup_env = "AZUREDREAMSRECOMP_FORCE_SETUP",

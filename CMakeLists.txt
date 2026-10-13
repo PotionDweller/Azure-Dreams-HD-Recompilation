@@ -12,11 +12,12 @@ endif()
 project(AzureDreamsRecomp LANGUAGES C CXX)
 
 # --- Opt-in product surfaces (OFF by default in the framework) -------------
-# Scaffold prompts / flags fill these. Without recomp-ui, PSX_RECOMP_UI is OFF.
+# recomp-ui launcher (Settings / Mods / disc picker before boot). recomp-ui/ is
+# a junction to F:\AzureRecomp\recomp-ui, pinned in PSXRECOMP_PIN.txt.
 # Setup-host CI requires WIZARD_CMAKE_BLOCK / ENABLE_SETUP_WIZARD (FORCE_SETUP_HOST
 # alone does not open first-run / Generate & rebuild).
-set(PSX_RECOMP_UI OFF CACHE BOOL
-    "No recomp-ui submodule in this scaffold" FORCE)
+set(PSX_RECOMP_UI ON CACHE BOOL
+    "Build the recomp-ui launcher (recomp-ui/ at the project root)" FORCE)
 # Full netplay UI -- enable after adding recomp-ui + testing:
 # if(EXISTS "${PSXRECOMP_ROOT}/lib/recomp-net/CMakeLists.txt")
 #     set(PSX_NETPLAY ON CACHE BOOL "..." FORCE)
@@ -35,6 +36,17 @@ if(NOT IS_DIRECTORY "${PSX_PRELOADED_MODS}")
     set(PSX_PRELOADED_MODS "NONE")
 endif()
 
+# Local, gitignored art: launcher box art and the exe icon.
+set(AZURE_LAUNCHER_BOXART_ARG "")
+if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/launcher_assets/img/boxart.tga")
+    set(AZURE_LAUNCHER_BOXART_ARG LAUNCHER_BOXART
+        "${CMAKE_CURRENT_SOURCE_DIR}/launcher_assets/img/boxart.tga")
+endif()
+set(AZURE_APP_ICON "${CMAKE_CURRENT_SOURCE_DIR}/assets/psxrecomp.ico")
+if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/assets/azure_dreams.ico")
+    set(AZURE_APP_ICON "${CMAKE_CURRENT_SOURCE_DIR}/assets/azure_dreams.ico")
+endif()
+
 psxrecomp_add_game_runtime(psx-runtime
     PRELOADED_MODS_DIR "${PSX_PRELOADED_MODS}"
     # ENABLE_NETPLAY_IF_PRESENT
@@ -43,8 +55,10 @@ psxrecomp_add_game_runtime(psx-runtime
     WINDOW_TITLE "AzureDreams Recompiled"
     DEFAULT_GAME_CONFIG_PATH "game.toml"
     MAX_PLAYERS 1
-    # LAUNCHER_BOXART "${CMAKE_CURRENT_SOURCE_DIR}/launcher_assets/img/boxart.tga"
-    APP_ICON "${CMAKE_CURRENT_SOURCE_DIR}/assets/psxrecomp.ico"
+    # Box art (fetch_boxart.py) and icon (cut from the title art) are local,
+    # gitignored art; fall back to the framework defaults when absent.
+    ${AZURE_LAUNCHER_BOXART_ARG}
+    APP_ICON "${AZURE_APP_ICON}"
     # Captured overlays compiled into the exe (compile_overlays.py --static).
     # Ignored by runtime.cmake when the file has not been generated. Must stay
     # ABOVE GEN_FULL_GLOB: that multi-value list would otherwise swallow this
@@ -52,7 +66,8 @@ psxrecomp_add_game_runtime(psx-runtime
     GAME_OVERLAY_STATIC_C "${CMAKE_CURRENT_SOURCE_DIR}/generated/overlays_static.c"
     GEN_MARKER "generated/SLUS_006.14_dispatch.c"
     GEN_FULL_GLOB "generated/SLUS_006.14_full_*.c"
-    # CODEGEN_SETUP_SOURCES -- add with recomp-ui / wizard later
+    # Launcher glue (recomp-ui); the setup wizard itself stays off.
+    CODEGEN_SETUP_SOURCES "${CMAKE_CURRENT_SOURCE_DIR}/codegen_setup.c"
 )
 
 # Game-owned trusted mod plugins (selected by mods/preloaded packages).
@@ -62,7 +77,7 @@ target_include_directories(psx-runtime PRIVATE
     "${PSXRECOMP_ROOT}/runtime/include")
 
 # Stage runtime configs next to the exe for direct build/ launches. Only copy
-# files that exist — never fail POST_BUILD when game_options.toml is absent.
+# files that exist Ã¢â‚¬â€ never fail POST_BUILD when game_options.toml is absent.
 foreach(_PSX_RUNTIME_CONFIG game.toml game_options.toml)
     if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/${_PSX_RUNTIME_CONFIG}")
         add_custom_command(TARGET psx-runtime POST_BUILD
