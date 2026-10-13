@@ -37,7 +37,7 @@ Requirements: Git, Python 3, and your own `Azure Dreams (USA).cue/.bin`
 The C toolchain (clang, CMake, Ninja, SDL3) is downloaded by psxrecomp.
 
 ```powershell
-git clone --recursive <this repository's URL> AzureDreamsRecomp
+git clone --recursive https://github.com/PotionDweller/Azure-Dreams-HD-Recompilation.git AzureDreamsRecomp
 cd AzureDreamsRecomp
 
 # 1. Apply this project's framework fixes (see patches/README.md).
