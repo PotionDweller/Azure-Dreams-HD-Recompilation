@@ -1,0 +1,2 @@
+# Keep the framework patch byte-exact (no CRLF conversion) so git apply works.
+patches/*.patch -text
