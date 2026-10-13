@@ -97,6 +97,23 @@ in town and in the tower; hooks check stock values before changing anything.
   art ([TCRF](https://new.tcrf.net/Azure_Dreams_(PlayStation))). All addresses
   above are for the US version and would have to be re-found there.
 
+## Potential future goals
+
+- **Japanese version with voice acting and an English translation.** The
+  Japanese release (*Other Life: Azure Dreams*, Nov 1997) has voiced dialogue
+  for every character and intro narration, all removed from the international
+  versions ([TCRF](https://new.tcrf.net/Azure_Dreams_(PlayStation))). The goal
+  is to recompile the Japanese version itself, apply an English translation,
+  and bring over this port's enhancements (widescreen, HUD and minimap moves,
+  fast loading, PGXP and the framework patches). Open questions:
+  - Each player would need their own Japanese disc.
+  - Whether a complete English fan translation of the Japanese version exists
+    is not yet known.
+  - Every address in this document is for the US version and would have to be
+    found again in the Japanese one; the sections above are the checklist.
+  - Reports that the US release is censored compared to the Japanese one are
+    unconfirmed; concrete examples are welcome.
+
 ## How things were found
 
 The debug build (`--debug-port 4370`, client `psxrecomp/tools/debug_client.py`)
