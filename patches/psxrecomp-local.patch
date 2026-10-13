@@ -1,0 +1,434 @@
+diff --git a/runtime/include/gpu_render.h b/runtime/include/gpu_render.h
+index ace31f11..16cde508 100644
+--- a/runtime/include/gpu_render.h
++++ b/runtime/include/gpu_render.h
+@@ -113,6 +113,10 @@ int  gr_wide_supported(void);
+ void gr_wide_configure(int wide_w, int offset);
+ void gr_wide_set_target(int base_x);
+ void gr_wide_disable_target(void);
++/* Horizontal clip window for the wide mirror, in canonical pixels relative to
++ * the current target's base_x (inclusive); x1 < 0 = full wide width. Returns 0
++ * if the backend does not support it (caller then keeps the old behaviour). */
++int  gr_wide_set_clip_x(int x1, int x2);
+ void gr_wide_clear(int base_x, int y, int h, uint16_t color);
+ /* sides: bit 0 = left synthetic margin, bit 1 = right. */
+ void gr_wide_clear_margins(int base_x, int y, int h, uint16_t color, int sides);
+@@ -199,6 +203,9 @@ typedef struct GpuRenderBackend {
+      * pixel count, writes width/height to ow/oh. NULL if unsupported. */
+     int  (*wide_dump_full)(uint32_t *out, int cap_pixels, int *ow, int *oh,
+                            int base_x);
++    /* Optional: horizontal clip window for the wide mirror (see
++     * gr_wide_set_clip_x). NULL = unsupported. */
++    void (*wide_set_clip_x)(int x1, int x2);
+ } GpuRenderBackend;
+ 
+ #ifdef __cplusplus
+diff --git a/runtime/include/sio.h b/runtime/include/sio.h
+index b943aab6..2d423278 100644
+--- a/runtime/include/sio.h
++++ b/runtime/include/sio.h
+@@ -237,6 +237,12 @@ uint32_t sio_get_seq(void);
+  * transaction by issuing 0x01 on the SIO bus mid-read. */
+ int sio_card_protocol_active(void);
+ 
++/* Local patch (AzureDreamsRecomp): cumulative count of BULK card transfers
++ * (writes, and reads of sectors not read in the last ~4 s of guest time).
++ * Menu polling re-reads the same sectors and does not advance it. main.cpp
++ * uses it as the memory-card load signal for Fast Loading host pacing. */
++int sio_get_mc_bulk_count(void);
++
+ /* 1 while a card txn/protocol is live or a card ACK just fired. interrupts.c
+  * uses this to defer in-exception ChangeThread so the game's SIO IntRP can
+  * finish its A6C10/B4E38 handshake (Ape Escape LOAD). */
+diff --git a/runtime/src/cdrom.c b/runtime/src/cdrom.c
+index 73884657..b565734d 100644
+--- a/runtime/src/cdrom.c
++++ b/runtime/src/cdrom.c
+@@ -2566,7 +2566,10 @@ static void process_pending(uint32_t cycles) {
+     case 0x15: /* SeekL complete */
+     case 0x16: /* SeekP complete */
+         stat_reg &= ~CDSTAT_SEEK;
+-        stat_reg |= CDSTAT_READ;   /* PSX-CD-003: GT1 waits for READ after seek */
++        /* Azure Dreams local patch: a finished SeekL/SeekP leaves the drive in
++         * standby with no active bits (Beetle MakeStatus -> 0x02). The upstream
++         * PSX-CD-003 `stat_reg |= CDSTAT_READ` (GT1) made Azure Dreams poll
++         * Getstat forever before its intro stream. */
+         setloc_seek_far = 0;
+     setloc_pending = 0;
+         response_push(stat_reg);
+diff --git a/runtime/src/gpu.c b/runtime/src/gpu.c
+index 8d91f79a..49c65121 100644
+--- a/runtime/src/gpu.c
++++ b/runtime/src/gpu.c
+@@ -2486,6 +2486,37 @@ static int ws_is_fb_base(uint32_t bx) {
+     return 0;
+ }
+ 
++/* Local patch (AzureDreamsRecomp): a draw area whose left edge lies strictly
++ * inside a known framebuffer is a clip window on that framebuffer (Azure
++ * Dreams draws its dungeon minimap through such a window), not an offscreen
++ * target. Report the framebuffer's base so native-wide can mirror into it. */
++static int ws_subrect_fb_base(uint32_t *out_base) {
++    const uint32_t w = (uint32_t)ws_disp_w();
++    for (int i = 0; i < ws_fb_n; i++) {
++        const uint32_t b = ws_fb_base[i];
++        if (draw_area_left > b && draw_area_left < b + w) {
++            if (out_base) *out_base = b;
++            return 1;
++        }
++    }
++    return 0;
++}
++
++/* Canonical (4:3 VRAM) draw area. While native-wide is active, a framebuffer
++ * clip window may extend past the framebuffer's right edge into the reveal
++ * strip; the wide mirror draws that part, but the canonical rasterizer must
++ * stop at the framebuffer edge so it never writes the VRAM beside it. */
++static void ws_apply_canonical_draw_area(void) {
++    int right = (int)draw_area_right;
++    uint32_t b;
++    if (ws_native_wide_active() && ws_subrect_fb_base(&b)) {
++        const int fb_right = (int)b + (int)ws_disp_w() - 1;
++        if (right > fb_right) right = fb_right;
++    }
++    gr_set_draw_area((int)draw_area_left, (int)draw_area_top,
++                     right, (int)draw_area_bottom);
++}
++
+ static void split_trace_reset(GpuVerticalSplitTrace *trace) {
+     memset(trace, 0, sizeof(*trace));
+ }
+@@ -2560,8 +2591,18 @@ static void ws_nw_sync_target(void) {
+         return;
+     }
+     uint32_t base = draw_area_left;
+-    if (ws_is_fb_base(base)) gr_wide_set_target((int)base);
+-    else                     gr_wide_disable_target();
++    if (ws_is_fb_base(base)) { gr_wide_set_target((int)base); return; }
++    /* Clip window inside a framebuffer: mirror into that framebuffer's wide
++     * surface, scissored to the window (falls back to no mirror on backends
++     * without clip support, i.e. the original behaviour). */
++    uint32_t sub_base;
++    if (ws_subrect_fb_base(&sub_base)) {
++        gr_wide_set_target((int)sub_base);
++        if (gr_wide_set_clip_x((int)(draw_area_left - sub_base),
++                               (int)(draw_area_right - sub_base)))
++            return;
++    }
++    gr_wide_disable_target();
+ }
+ 
+ static void ws_clear_all_reveal_margins(void) {
+@@ -4349,8 +4390,7 @@ static void gp0_exec_draw_area_tl(void) {
+     draw_area_left = param & 0x3FF;
+     draw_area_top  = (param >> 10) & 0x3FF;
+     split_trace_note_draw_area();
+-    gr_set_draw_area((int)draw_area_left, (int)draw_area_top,
+-                     (int)draw_area_right, (int)draw_area_bottom);
++    ws_apply_canonical_draw_area();
+     ws_nw_sync_target();  /* back buffer (draw_area_left) → wide mirror surface */
+ }
+ 
+@@ -4362,8 +4402,7 @@ static void gp0_exec_draw_area_br(void) {
+     draw_area_right  = param & 0x3FF;
+     draw_area_bottom = (param >> 10) & 0x3FF;
+     split_trace_note_draw_area();
+-    gr_set_draw_area((int)draw_area_left, (int)draw_area_top,
+-                     (int)draw_area_right, (int)draw_area_bottom);
++    ws_apply_canonical_draw_area();
+     ws_nw_sync_target();  /* back buffer (draw_area_left) → wide mirror surface */
+ }
+ 
+@@ -5939,8 +5978,7 @@ int gpu_snapshot_read(const uint8_t *p, uint32_t len) {
+     if (!gpu_snap_parse(&r)) return 0;
+     /* Sync renderer clip/scissor to restored GP0(E3/E4); vars alone leave GL
+      * on a stale draw area after savestate load. */
+-    gr_set_draw_area((int)draw_area_left, (int)draw_area_top,
+-                     (int)draw_area_right, (int)draw_area_bottom);
++    ws_apply_canonical_draw_area();
+     ws_nw_sync_target();
+     return 1;
+ }
+diff --git a/runtime/src/gpu_gl_renderer.c b/runtime/src/gpu_gl_renderer.c
+index 3312551e..a6db2d57 100644
+--- a/runtime/src/gpu_gl_renderer.c
++++ b/runtime/src/gpu_gl_renderer.c
+@@ -513,6 +513,11 @@ static int    g_wide_w        = 0;           /* wide width (native px); 0 = disa
+ static int    g_wide_off      = 0;           /* centering OFFSET (native px) */
+ static GLuint g_wide_cur      = 0;           /* active mirror FBO (0 = no mirror) */
+ static int    g_wide_cur_base = 0;           /* base_x of g_wide_cur */
++/* Optional horizontal clip window for the mirror, canonical px relative to
++ * g_wide_cur_base (inclusive); -1 = full wide width. Set when the guest draw
++ * area is a sub-rectangle of a framebuffer (e.g. a HUD/minimap clip window). */
++static int    g_wide_clip_x1  = -1;
++static int    g_wide_clip_x2  = -1;
+ /* Set by gpu_flat_rect for the full-screen-overlay case so the generic
+  * gpu_geometry wide mirror is skipped and the flat path emits its own
+  * full-wide-width pass instead (mirrors sw_draw_flat_rect). */
+@@ -1606,7 +1611,16 @@ static void wide_target_begin(int dx, GLint uXoff, GLint uXhalf) {
+         if (sy < 0) { sh += sy; sy = 0; }
+         if (sy + sh > VRAM_H) sh = VRAM_H - sy;
+         if (sh < 0) sh = 0;
+-        glScissor(0, sy * s_scale, g_wide_w * s_scale, sh * s_scale);
++        /* X: full wide surface, unless a sub-rect clip window is active. */
++        int sx = 0, sw = g_wide_w;
++        if (g_wide_clip_x1 >= 0 && g_wide_clip_x2 >= g_wide_clip_x1) {
++            sx = g_wide_clip_x1 + g_wide_off;
++            sw = g_wide_clip_x2 - g_wide_clip_x1 + 1;
++            if (sx < 0) { sw += sx; sx = 0; }
++            if (sx + sw > g_wide_w) sw = g_wide_w - sx;
++            if (sw < 0) sw = 0;
++        }
++        glScissor(sx * s_scale, sy * s_scale, sw * s_scale, sh * s_scale);
+     }
+     p_glUniform1f(uXoff, (float)dx);
+     p_glUniform1f(uXhalf, (float)g_wide_w / 2.0f);
+@@ -3391,13 +3405,29 @@ static void glb_wide_set_target(int base_x) {
+     if (!s_raster_ok) { g_wide_cur = 0; return; }
+     double t0 = cw_ms(); s_cw_wide_sets++;
+     flush_tex_batch();   /* drain into the OLD target before switching */
++    flush_flat_batch();
+     g_wide_cur = wide_fbo_for(base_x);
+     g_wide_cur_base = base_x;
++    g_wide_clip_x1 = g_wide_clip_x2 = -1;   /* full width unless re-clipped */
+     s_cw_wide_ms += cw_ms() - t0;
+ }
+ 
+ /* Stop mirroring (offscreen draws that don't target a framebuffer). */
+-static void glb_wide_disable_target(void) { flush_tex_batch(); g_wide_cur = 0; }
++static void glb_wide_disable_target(void) {
++    flush_tex_batch();
++    flush_flat_batch();
++    g_wide_cur = 0;
++    g_wide_clip_x1 = g_wide_clip_x2 = -1;
++}
++
++/* Clip the mirror horizontally to a sub-rect of the current framebuffer. Pending
++ * batches mirror with the scissor in force at flush time, so drain them first. */
++static void glb_wide_set_clip_x(int x1, int x2) {
++    flush_tex_batch();
++    flush_flat_batch();
++    g_wide_clip_x1 = x1;
++    g_wide_clip_x2 = x2;
++}
+ 
+ /* Mirror a framebuffer clear: fill the full wide width over [y, y+h) of the
+  * surface for base_x, so the revealed margins are clean. Mirrors sw_wide_clear:
+@@ -4501,6 +4531,7 @@ static const GpuRenderBackend GL_BACKEND = {
+     .wide_clear_margins = glb_wide_clear_margins,
+     .render_wide_display = glb_render_wide_display,
+     .wide_dump_full = glb_wide_dump_full,
++    .wide_set_clip_x = glb_wide_set_clip_x,
+ };
+ 
+ const GpuRenderBackend *gl_backend_get(void) { return &GL_BACKEND; }
+diff --git a/runtime/src/gpu_render.c b/runtime/src/gpu_render.c
+index c833f491..a7c913f4 100644
+--- a/runtime/src/gpu_render.c
++++ b/runtime/src/gpu_render.c
+@@ -173,6 +173,11 @@ void gr_wide_set_target(int base_x) {
+ void gr_wide_disable_target(void) {
+     if (g_b->wide_disable_target) g_b->wide_disable_target();
+ }
++int gr_wide_set_clip_x(int x1, int x2) {
++    if (!g_b->wide_set_clip_x) return 0;
++    g_b->wide_set_clip_x(x1, x2);
++    return 1;
++}
+ void gr_wide_clear(int base_x, int y, int h, uint16_t color) {
+     if (g_b->wide_clear) g_b->wide_clear(base_x, y, h, color);
+ }
+diff --git a/runtime/src/host_keymap.c b/runtime/src/host_keymap.c
+index 848309e2..7eb04344 100644
+--- a/runtime/src/host_keymap.c
++++ b/runtime/src/host_keymap.c
+@@ -208,6 +208,18 @@ void host_keymap_load(const char *config_ini_path) {
+     apply_defaults();
+ }
+ 
++/* Local patch (AzureDreamsRecomp): SDL reports WHICH side of a modifier is held
++ * (LALT, RCTRL, ...) while binds store "either side" (KMOD_ALT = LALT|RALT).
++ * Comparing the raw values meant Alt+Enter / Ctrl+F never matched. Collapse
++ * each modifier to "either side" before comparing. */
++static int norm_mods(int mod) {
++    int out = 0;
++    if (mod & KMOD_CTRL)  out |= KMOD_CTRL;
++    if (mod & KMOD_ALT)   out |= KMOD_ALT;
++    if (mod & KMOD_SHIFT) out |= KMOD_SHIFT;
++    return out;
++}
++
+ int host_keymap_match_event(HostKeymapAction action, int keycode,
+                             int scancode, int mod) {
+     const HostKeyAction *a;
+@@ -219,7 +231,7 @@ int host_keymap_match_event(HostKeymapAction action, int keycode,
+         if (a->binds[i].keycode != keycode &&
+             (scancode <= 0 || a->binds[i].scancode != scancode))
+             continue;
+-        if ((mod & relevant) == a->binds[i].mods) return 1;
++        if (norm_mods(mod & relevant) == norm_mods(a->binds[i].mods)) return 1;
+     }
+     return 0;
+ }
+@@ -238,7 +250,7 @@ int host_keymap_down(HostKeymapAction action, const uint8_t *keys, int mod) {
+         const int sc = a->binds[i].scancode;
+         if (sc <= 0 || sc >= SDL_NUM_SCANCODES) continue;
+         if (!keys[sc]) continue;
+-        if ((mod & relevant) == a->binds[i].mods) return 1;
++        if (norm_mods(mod & relevant) == norm_mods(a->binds[i].mods)) return 1;
+     }
+     return 0;
+ }
+diff --git a/runtime/src/main.cpp b/runtime/src/main.cpp
+index 022b1baa..887938f3 100644
+--- a/runtime/src/main.cpp
++++ b/runtime/src/main.cpp
+@@ -1,4 +1,4 @@
+-﻿/* main.cpp — Phase 3 runtime entry point.
++/* main.cpp — Phase 3 runtime entry point.
+  *
+  * Loads BIOS ROM, initializes CPU state + SDL display, calls into
+  * the recompiled reset vector. BIOS drives execution; SDL presents
+@@ -1621,6 +1621,17 @@ static void clamp_window_aspect(int* w, int* h, int num, int den) {
+     *h = width * den / num;
+ }
+ 
++/* Local patch (AzureDreamsRecomp): when Alt+Enter leaves fullscreen, maximise
++ * instead of dropping to the window's creation size. That size is the
++ * launcher's fixed width (960..1920 physical pixels), which is a small box on a
++ * high-DPI display (a 4K panel at 200% scaling). On SDL3 this runs from
++ * SDL_EVENT_WINDOW_LEAVE_FULLSCREEN, because SDL restores its own remembered
++ * geometry when the asynchronous transition completes. */
++static bool s_fs_restore_pending = false;
++static void apply_windowed_size_after_fullscreen(void) {
++    if (sdl_window) SDL_MaximizeWindow(sdl_window);
++}
++
+ static int aspect_gcd(int a, int b) {
+     while (b) { int t = a % b; a = b; b = t; }
+     return a > 0 ? a : 1;
+@@ -6562,6 +6573,12 @@ static NetplayVblankEpilogue sdl_vblank_present_body(void) {
+                 psx_crash_trace_set_exit_origin("sdl_window_close");
+                 shutdown_runtime();
+                 std::exit(0);
++#if defined(PSX_SDL3)
++            } else if (ev.type == SDL_EVENT_WINDOW_LEAVE_FULLSCREEN &&
++                       s_fs_restore_pending) {
++                s_fs_restore_pending = false;   /* local patch, see helper */
++                apply_windowed_size_after_fullscreen();
++#endif
+             } else if (ev.type == SDL_CONTROLLERDEVICEADDED) {
+                 refresh_player_devices();
+             } else if (ev.type == SDL_CONTROLLERDEVICEREMOVED) {
+@@ -6653,6 +6670,20 @@ static NetplayVblankEpilogue sdl_vblank_present_body(void) {
+                                    SDL_WINDOW_FULLSCREEN;
+                     if (is_fs) {
+                         SDL_SetWindowFullscreen(sdl_window, 0);
++                        /* Local patch (AzureDreamsRecomp): a window created
++                         * fullscreen restores to a tiny frame (SDL3 does not
++                         * keep the creation size as the windowed size). Apply
++                         * the configured size, or fit the display when none
++                         * is set, as the windowed startup path does. */
++#if defined(PSX_SDL3)
++                        /* SDL3 leaves fullscreen asynchronously and then
++                         * restores its own remembered geometry, overriding
++                         * any resize issued here; apply ours once the
++                         * transition has finished (LEAVE_FULLSCREEN). */
++                        s_fs_restore_pending = true;
++#else
++                        apply_windowed_size_after_fullscreen();
++#endif
+                         host_osd_push("Windowed", 1500);
+                     } else {
+                         /* If the configured mode is "off", the hotkey still
+@@ -6739,8 +6770,27 @@ static NetplayVblankEpilogue sdl_vblank_present_body(void) {
+ 
+     /* Turbo-active test shared by the pacing/present gate below. */
+     int turbo_loads_active = 0;
++    /* Local patch (AzureDreamsRecomp): BULK memory-card transfers (writes, and
++     * reads of sectors not recently read -- see sio_get_mc_bulk_count) also
++     * count as a load for Fast Loading's host pacing, so in-game saves/loads
++     * are shortened while save/load menus that merely poll the card stay at
++     * normal speed. Pacing only: guest cycles, SIO byte timing and IRQs stay
++     * authentic. Bulk activity within the last MC_LOAD_HOLD_FRAMES guest
++     * frames counts as active, bridging the gaps between sector transfers. */
++    enum { MC_LOAD_HOLD_FRAMES = 30 };
++    static int s_mc_last_bulk = -1;
++    static int s_mc_hold = 0;
++    {
++        const int bulk = sio_get_mc_bulk_count();
++        if (s_mc_last_bulk >= 0 && bulk != s_mc_last_bulk)
++            s_mc_hold = MC_LOAD_HOLD_FRAMES;
++        else if (s_mc_hold > 0)
++            s_mc_hold--;
++        s_mc_last_bulk = bulk;
++    }
+     int logical_load_active = fntrace_is_game_started() &&
+-        (cdrom_load_in_progress() || cdrom_savestate_cd_wait_active());
++        (cdrom_load_in_progress() || cdrom_savestate_cd_wait_active() ||
++         s_mc_hold > 0);
+     int load_run_value = 0;
+     static int load_run = 0;
+     static int release_run = 0;
+@@ -13356,9 +13406,16 @@ session_reboot:
+         g_video_perspective_texturing = (*e && *e != '0') ? 1 : 0;
+     if (const char* e = std::getenv("PSX_PGXP_CPU_MODE"))
+         g_video_pgxp_cpu_mode = (*e && *e != '0') ? 1 : 0;
+-    gte_geometry_correction_set(g_video_geometry_correction);
+-    gpu_texture_correction_set(g_video_perspective_texturing);
+-    pgxp_set_cpu_mode(g_video_pgxp_cpu_mode);
++    /* Local patch (AzureDreamsRecomp): mod_runtime_activate_plugins() ran
++     * above, so an enabled PGXP mod (psx.enhancement.pgxp) has already armed
++     * these. Config may add a correction but must not cancel an enabled mod;
++     * otherwise the Mods page toggle is a no-op whenever game.toml leaves the
++     * corrections off. */
++    gte_geometry_correction_set(g_video_geometry_correction ||
++                                gte_geometry_correction_enabled());
++    gpu_texture_correction_set(g_video_perspective_texturing ||
++                               gpu_texture_correction_enabled());
++    pgxp_set_cpu_mode(g_video_pgxp_cpu_mode || pgxp_cpu_mode());
+     pgxp_set_tolerance(g_video_pgxp_tolerance);
+     /* Scanlines: env override wins over config, same as the corrections above,
+      * so a headless/free-run boot can be captured with the effect armed from the
+diff --git a/runtime/src/sio.c b/runtime/src/sio.c
+index 08dcadd0..4155c275 100644
+--- a/runtime/src/sio.c
++++ b/runtime/src/sio.c
+@@ -869,6 +869,29 @@ int sio_get_card_arm_countdown_after(void) {
+ 
+ int sio_get_mc_probe_count(void) { return sio_mc_probe_count; }
+ int sio_get_mc_ack_count(void) { return sio_mc_ack_count; }
++
++/* Local patch (AzureDreamsRecomp): bulk card-transfer counter, the load
++ * signal for Fast Loading host pacing (main.cpp). Save/load menus poll the
++ * card by re-reading the same directory/icon sectors over and over, while a
++ * real save writes and a real load reads a run of sectors once each. So a
++ * transfer counts as bulk if it is a write, or a read of a sector that was not
++ * read in the last MC_FRESH_READ_CYCLES of guest time (guest time, so the
++ * window is independent of how fast pacing runs). Host-only bookkeeping: it
++ * never changes what the guest sees. */
++#define MC_FRESH_READ_CYCLES (4ull * 33868800ull)   /* ~4 s of guest time */
++static uint64_t s_mc_sector_last_read[2][MEMCARD_SECTORS];  /* 0 = never */
++static int      s_mc_bulk_count = 0;
++static void mc_note_transfer(int slot, uint8_t cmd, uint16_t sector) {
++    extern uint64_t psx_get_cycle_count(void);
++    if (cmd == 0x57) { s_mc_bulk_count++; return; }
++    if (cmd != 0x52 || slot < 0 || slot > 1 || sector >= MEMCARD_SECTORS) return;
++    const uint64_t now  = psx_get_cycle_count() + 1u;   /* keep 0 = never */
++    const uint64_t last = s_mc_sector_last_read[slot][sector];
++    if (last == 0 || now - last > MC_FRESH_READ_CYCLES) s_mc_bulk_count++;
++    s_mc_sector_last_read[slot][sector] = now;
++}
++int sio_get_mc_bulk_count(void) { return s_mc_bulk_count; }
++
+ int sio_get_mc_cmd_count(void) { return sio_mc_cmd_count; }
+ int sio_get_mc_read_count(void) { return sio_mc_read_count; }
+ int sio_get_mc_read_done(void) { return sio_mc_read_done; }
+@@ -1726,6 +1749,7 @@ static void mc_process_byte(uint8_t tx_byte) {
+     case MC_ADDR_LSB:
+         mc_sector_lsb = tx_byte;
+         mc_sector = ((uint16_t)mc_sector_msb << 8) | mc_sector_lsb;
++        mc_note_transfer(mc_slot, mc_cmd, mc_sector);   /* local patch: Fast Loading signal */
+ 
+         if (mc_cmd == 0x52) {
+             if (mc_sector < MEMCARD_SECTORS) {

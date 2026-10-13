@@ -88,8 +88,6 @@ starvation_dump.jsonl
 !/catalog_identity.json
 !/disc_probe.json
 
-# Launcher UI: junction to F:\AzureRecomp\recomp-ui (pinned in the outer repo's PSXRECOMP_PIN.txt)
-/recomp-ui
 
 # Local launcher art (box art from libretro-thumbnails, icon cut from title art)
 /launcher_assets/img/boxart.*
