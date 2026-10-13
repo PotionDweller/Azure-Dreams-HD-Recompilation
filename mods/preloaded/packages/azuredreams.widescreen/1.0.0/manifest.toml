@@ -13,10 +13,9 @@ game_id = "SLUS-00614"
 [[feature]]
 id = "widescreen"
 name = "Widescreen 16:9"
-description = "Experimental and off by default. Objects near the left/right edges may pop in, and some HUD or menu elements may not be placed for the wider screen. FMVs and the BIOS boot stay 4:3."
+description = "On by default. Widens the town and dungeon view to 16:9 and moves the HUD panel and dungeon minimap to the wide screen edges. Movies, menus and the BIOS boot stay 4:3. Turn off for the original 4:3 picture."
 group = "Visual"
-channel = "experimental"
-default_enabled = false
+default_enabled = true
 
 [[plugin]]
 feature = "widescreen"
