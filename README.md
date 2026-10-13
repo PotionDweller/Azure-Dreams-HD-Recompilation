@@ -70,6 +70,14 @@ you care about, close the game normally, then run
 `psxrecomp\tools\compile_overlays.py --static` and rebuild. Captures contain
 game code and are gitignored; each player makes their own.
 
+## Findings
+
+Everything discovered while making this port is written up in
+[`docs/FINDINGS.md`](docs/FINDINGS.md), and you are welcome to use it for
+your own experiments, mods or ports: the memory addresses and original values
+behind the widescreen view, the HUD and minimap positions, the screen-edge
+checks and the loading speed-ups, plus the debug commands used to find them.
+
 ## Repository layout
 
 | Path | What |
