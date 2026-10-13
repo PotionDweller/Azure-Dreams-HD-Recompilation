@@ -80,6 +80,29 @@ game code and are gitignored; each player makes their own.
 | `patches/` | Fixes applied to the pinned psxrecomp framework |
 | `psxrecomp/`, `recomp-ui/` | Framework and launcher submodules (pinned) |
 
+## Credits
+
+- **[psxrecomp](https://github.com/mstan/psxrecomp)** and
+  **[recomp-ui](https://github.com/mstan/recomp-ui)** — the static
+  recompilation framework and launcher this port is built on.
+- **OpenBIOS** — the bundled open-source PlayStation BIOS.
+- **[libretro-thumbnails](https://github.com/libretro-thumbnails/libretro-thumbnails)** — optional launcher box art.
+
+This port was made with the assistance of **Claude** (Anthropic's AI
+assistant, via Claude Code). Claude helped with:
+
+- **Debugging** — tracking down framework issues such as the black screen
+  before the intro movie, controller input, fullscreen hotkeys and Fast
+  Loading behaviour, using the framework's debug server and logs.
+- **Reverse engineering** — tracing the game's code and memory while it runs
+  to find what the enhancements needed: the camera view rectangle that decides
+  which terrain is drawn, the HUD position table, the dungeon minimap's
+  drawing routine and clip window, and the screen-edge culling checks.
+- **Writing code** — the widescreen mod, the framework patches in `patches/`,
+  and the build and packaging scripts.
+
+All changes were tested in-game by the project owner.
+
 ## Legal
 
 You must own the original game. Disc images, BIOS dumps, saves, overlay
