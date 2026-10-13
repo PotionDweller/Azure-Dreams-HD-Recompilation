@@ -6,6 +6,7 @@
 
 | File(s) | Change | Why |
 |---|---|---|
+| `tools/prepare_disc.py` | The extracted boot EXE is trimmed to the size its header declares | Azure Dreams stores `SLUS_006.14` as 512 KB with padding; the recompiler needs the exact 348,160 bytes the BIOS loads |
 | `cdrom.c` | SeekL/SeekP completion no longer reports the Read status bit | Azure Dreams polls Getstat after seeking to the intro movie and hangs on a black screen otherwise |
 | `gpu.c`, `gpu_render.{c,h}`, `gpu_gl_renderer.c` | Native widescreen mirrors draws clipped to a window inside a framebuffer, and keeps the 4:3 draw inside the framebuffer | The dungeon minimap draws through such a clip window; without this it is cut off at the 4:3 edge |
 | `cdrom.{c,h}`, `main.cpp` | A disc read only counts as a load for Fast Loading after 1.5 s of continuous reading | Short in-game reads (NPC portraits, equipping gear, formation menu, summoning) otherwise fast-forwarded about half a second of gameplay |

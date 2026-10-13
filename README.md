@@ -61,16 +61,6 @@ python psxrecomp\psxrecomp_cli.py rebuild --config game.toml --project-root . --
 Then run `build-release\AzureDreams_Recompiled.exe`. The launcher opens; pick
 your disc with **Browse For Disc** the first time, then press **PLAY**.
 
-**Step 2 will fail the first time** on the boot executable's size: on the disc
-`SLUS_006.14` is 512 KB, but its header declares 348,160 bytes and the
-recompiler requires the exact size. Truncate the extracted copy and run
-`generate` again (the BIOS only ever loads the declared size):
-
-```powershell
-$f = [IO.File]::Open("$PWD\disc\SLUS_006.14", 'Open', 'ReadWrite'); $f.SetLength(348160); $f.Close()
-python psxrecomp\psxrecomp_cli.py generate --config game.toml --project-root . --disc "C:\path\to\Azure Dreams (USA).cue"
-```
-
 ### Overlays (optional, for speed)
 
 Azure Dreams loads extra code ("overlays") at runtime. Out of the box those run

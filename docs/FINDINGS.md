@@ -83,7 +83,7 @@ in town and in the tower; hooks check stock values before changing anything.
 ## Other facts
 
 - **Boot EXE:** `SLUS_006.14`, 512 KB on disc but its header declares 348,160
-  bytes; the recompiler needs the exact size (truncate the extracted copy).
+  bytes; the recompiler needs the exact size, so the patched prepare step trims the extracted copy automatically.
   Load address `0x8002D000`, entry `0x80033930`.
 - **Controller:** the game predates the DualShock and ignores a pad in analog
   mode (id `0x73`), so `lock_mode = true` pins every seat to digital.

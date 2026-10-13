@@ -478,3 +478,28 @@ index 08dcadd0..4155c275 100644
  
          if (mc_cmd == 0x52) {
              if (mc_sector < MEMCARD_SECTORS) {
+diff --git a/tools/prepare_disc.py b/tools/prepare_disc.py
+index f3e39f28..2ef2fb77 100644
+--- a/tools/prepare_disc.py
++++ b/tools/prepare_disc.py
+@@ -435,6 +435,20 @@ def extract_via(
+         files[need] = bytes(out)
+     if files[boot_exe][:8] != b"PS-X EXE":
+         raise SystemExit(f"{boot_exe} is not a PS-X EXE")
++    # Local patch (AzureDreamsRecomp): some discs store the boot EXE with
++    # padding after the image its header declares (Azure Dreams: a 512 KB file
++    # whose header says 2048 + 0x54800 bytes). The BIOS loader only ever reads
++    # the 2048-byte header plus t_size (offset 0x1C), and the recompiler
++    # requires that exact size, so stage exactly what the BIOS would load.
++    exe = files[boot_exe]
++    declared = 2048 + struct.unpack_from("<I", exe, 0x1C)[0]
++    if len(exe) > declared:
++        print(f"  {boot_exe}: trimming {len(exe)} -> {declared} bytes "
++              "(header-declared size; padding after it is never loaded)")
++        files[boot_exe] = exe[:declared]
++    elif len(exe) < declared:
++        raise SystemExit(f"{boot_exe} is {len(exe)} bytes but its header "
++                         f"declares {declared}")
+     return entries, files
+ 
+ 
