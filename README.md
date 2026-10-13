@@ -29,14 +29,21 @@ Controllers: any SDL gamepad or the keyboard, in the original digital-pad mode
 
 ## Building (Windows)
 
-> These steps describe how this port was built. They have not yet been tested
-> from a fresh clone on another machine; please open an issue if a step fails.
+> Tested from a fresh clone on Windows 10 with only Git and Python installed
+> (the framework fetched its own toolchain). Please open an issue if a step
+> fails for you.
 
 Requirements: Git, Python 3, and your own `Azure Dreams (USA).cue/.bin`
 (the cue/bin SHA-1s are listed in `game.toml` under `[prepare_disc]`).
-The C toolchain (clang, CMake, Ninja, SDL3) is downloaded by psxrecomp.
+The C toolchain (clang, CMake, Ninja, SDL3) is downloaded by psxrecomp; you do
+not need CMake installed.
+
+**Clone into a short folder** such as `C:\src`. The framework has deeply nested
+files, and a long path fails on Windows with "Filename too long". Alternatively
+run `git config --global core.longpaths true` first.
 
 ```powershell
+cd C:\src
 git clone --recursive https://github.com/PotionDweller/Azure-Dreams-HD-Recompilation.git AzureDreamsRecomp
 cd AzureDreamsRecomp
 
@@ -47,19 +54,22 @@ powershell -ExecutionPolicy Bypass -File scripts\apply-psxrecomp-patch.ps1
 python psxrecomp\psxrecomp_cli.py ensure-toolchain
 python psxrecomp\psxrecomp_cli.py generate --config game.toml --project-root . --disc "C:\path\to\Azure Dreams (USA).cue"
 
-# 3. Build.
-cmake -S . -B build-release -G Ninja -DCMAKE_BUILD_TYPE=Release
-cmake --build build-release --target psx-runtime
+# 3. Build (uses the framework's own toolchain).
+python psxrecomp\psxrecomp_cli.py rebuild --config game.toml --project-root . --build-dir build-release --target psx-runtime --no-pgo
 ```
 
 Then run `build-release\AzureDreams_Recompiled.exe`. The launcher opens; pick
 your disc with **Browse For Disc** the first time, then press **PLAY**.
 
-**Known gotcha:** the boot executable on the disc (`SLUS_006.14`) is 512 KB,
-but its header declares 348,160 bytes and the recompiler requires the exact
-size. If generation fails on the EXE size, truncate the extracted
-`disc\SLUS_006.14` to 348160 bytes and run `generate` again
-(the BIOS only ever loads the declared size).
+**Step 2 will fail the first time** on the boot executable's size: on the disc
+`SLUS_006.14` is 512 KB, but its header declares 348,160 bytes and the
+recompiler requires the exact size. Truncate the extracted copy and run
+`generate` again (the BIOS only ever loads the declared size):
+
+```powershell
+$f = [IO.File]::Open("$PWD\disc\SLUS_006.14", 'Open', 'ReadWrite'); $f.SetLength(348160); $f.Close()
+python psxrecomp\psxrecomp_cli.py generate --config game.toml --project-root . --disc "C:\path\to\Azure Dreams (USA).cue"
+```
 
 ### Overlays (optional, for speed)
 

@@ -5,7 +5,10 @@
 # Without the patch Azure Dreams black-screens before the intro movie (CD
 # SeekL status), and the widescreen minimap, memory-card fast loading, the
 # PGXP mod toggle and Alt+Enter fullscreen do not work. See patches/README.md.
-$ErrorActionPreference = 'Stop'
+# Not 'Stop': Windows PowerShell 5.1 turns a native command's stderr into a
+# terminating error under 'Stop', and the "already applied?" probe below is
+# expected to print an error on a fresh clone. Exit codes are checked instead.
+$ErrorActionPreference = 'Continue'
 $root  = Split-Path -Parent $PSScriptRoot
 $patch = Join-Path $root 'patches\psxrecomp-local.patch'
 $fw    = Join-Path $root 'psxrecomp'
