@@ -67,7 +67,7 @@ fmv_filter = "bicubic"
 gte_game_mode = true
 
 # Widescreen culling. Inert at 4:3: every widened compare uses a margin that
-# is zero unless the (experimental, default-off) widescreen mod is enabled.
+# is zero unless the widescreen mod (on by default) is enabled.
 [widescreen.cull]
 auto_screen_x = true   # widen the standard GTE screen-extent rejects
 # Azure Dreams' reject window is the biased `x+32 < 385` / `y+32 < 289`

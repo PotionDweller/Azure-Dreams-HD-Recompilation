@@ -78,6 +78,7 @@ game code and are gitignored; each player makes their own.
 | `src/mod_widescreen.c` | Widescreen mod plugin (view rectangle, HUD, minimap) |
 | `mods/preloaded/packages/` | Mod packages shown in the launcher (widescreen; default-on overrides of Fast Loading and PGXP) |
 | `patches/` | Fixes applied to the pinned psxrecomp framework |
+| `docs/FINDINGS.md` | **What does what:** addresses and values behind widescreen, the HUD/minimap moves and the speed-ups, and how they were found |
 | `psxrecomp/`, `recomp-ui/` | Framework and launcher submodules (pinned) |
 
 ## Credits
