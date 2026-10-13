@@ -1,3 +1,19 @@
+diff --git a/runtime/include/cdrom.h b/runtime/include/cdrom.h
+index df5cb346..2504f8ed 100644
+--- a/runtime/include/cdrom.h
++++ b/runtime/include/cdrom.h
+@@ -103,6 +103,11 @@ uint32_t cdrom_get_burst_total(void);
+  * data sector delivered within the burst-gap window). XA streaming is never
+  * a load. Drives turbo-through-loads (step 4). */
+ int cdrom_load_in_progress(void);
++/* Local patch (AzureDreamsRecomp): guest frames the current load burst has
++ * spent actually delivering sectors (last sector frame - first sector frame),
++ * excluding the gap-bridge tail; 0 when no load is in progress. Lets turbo
++ * ignore the short reads games make during play (portraits, menus). */
++int cdrom_current_burst_span(void);
+ /* Physical non-XA data-read command state, without the logical load gap
+  * bridge used by cdrom_load_in_progress(). Diagnostics only. */
+ int cdrom_data_read_active(void);
 diff --git a/runtime/include/gpu_render.h b/runtime/include/gpu_render.h
 index ace31f11..16cde508 100644
 --- a/runtime/include/gpu_render.h
@@ -41,7 +57,7 @@ index b943aab6..2d423278 100644
   * uses this to defer in-exception ChangeThread so the game's SIO IntRP can
   * finish its A6C10/B4E38 handshake (Ape Escape LOAD). */
 diff --git a/runtime/src/cdrom.c b/runtime/src/cdrom.c
-index 73884657..b565734d 100644
+index 73884657..ba917aa8 100644
 --- a/runtime/src/cdrom.c
 +++ b/runtime/src/cdrom.c
 @@ -2566,7 +2566,10 @@ static void process_pending(uint32_t cycles) {
@@ -56,6 +72,19 @@ index 73884657..b565734d 100644
          setloc_seek_far = 0;
      setloc_pending = 0;
          response_push(stat_reg);
+@@ -3237,6 +3240,12 @@ int cdrom_load_in_progress(void) {
+     return 0;
+ }
+ 
++int cdrom_current_burst_span(void) {
++    if (!cdrom_load_in_progress() || s_burst_count == 0) return 0;
++    const CdBurst *b = &s_bursts[(s_burst_count - 1u) % CD_BURST_CAP];
++    return (int)(b->end_frame - b->start_frame);
++}
++
+ int cdrom_data_read_active(void) {
+     return reading && !xa_stream_active;
+ }
 diff --git a/runtime/src/gpu.c b/runtime/src/gpu.c
 index 8d91f79a..49c65121 100644
 --- a/runtime/src/gpu.c
@@ -280,7 +309,7 @@ index 848309e2..7eb04344 100644
      return 0;
  }
 diff --git a/runtime/src/main.cpp b/runtime/src/main.cpp
-index 022b1baa..887938f3 100644
+index 022b1baa..8a39e1cb 100644
 --- a/runtime/src/main.cpp
 +++ b/runtime/src/main.cpp
 @@ -1,4 +1,4 @@
@@ -307,7 +336,23 @@ index 022b1baa..887938f3 100644
  static int aspect_gcd(int a, int b) {
      while (b) { int t = a % b; a = b; b = t; }
      return a > 0 ? a : 1;
-@@ -6562,6 +6573,12 @@ static NetplayVblankEpilogue sdl_vblank_present_body(void) {
+@@ -2058,6 +2069,15 @@ static int g_turbo_audio_sink_config_enabled = 0;
+  * advancing normally. */
+ #define TURBO_LOADS_ENGAGE_FRAMES  4
+ #define TURBO_LOADS_RELEASE_FRAMES 6
++/* Local patch (AzureDreamsRecomp): a CD burst only counts as a load once it
++ * has been delivering sectors for this many guest frames. Games also read the
++ * disc during play (Azure Dreams: NPC portraits, equipping gear, formation
++ * menu, summoning -- 1..8 sectors over 1..4 frames); with only the 4-frame
++ * engage debounce, the burst's 30-frame gap-bridge tail kept turbo on and
++ * fast-forwarded ~half a second of gameplay. Measured real loads (save load,
++ * tower entry, return to town) span 435-495 frames, the largest in-play read
++ * 71, so 90 (1.5 s) separates them; real loads lose ~1.5 s of acceleration. */
++#define TURBO_LOADS_MIN_BURST_FRAMES 90
+ /* Zero multiplier retains the historical uncapped turbo behavior. */
+ static int g_turbo_load_wall_multiplier = 0;
+ static int g_turbo_load_release_frames = TURBO_LOADS_RELEASE_FRAMES;
+@@ -6562,6 +6582,12 @@ static NetplayVblankEpilogue sdl_vblank_present_body(void) {
                  psx_crash_trace_set_exit_origin("sdl_window_close");
                  shutdown_runtime();
                  std::exit(0);
@@ -320,7 +365,7 @@ index 022b1baa..887938f3 100644
              } else if (ev.type == SDL_CONTROLLERDEVICEADDED) {
                  refresh_player_devices();
              } else if (ev.type == SDL_CONTROLLERDEVICEREMOVED) {
-@@ -6653,6 +6670,20 @@ static NetplayVblankEpilogue sdl_vblank_present_body(void) {
+@@ -6653,6 +6679,20 @@ static NetplayVblankEpilogue sdl_vblank_present_body(void) {
                                     SDL_WINDOW_FULLSCREEN;
                      if (is_fs) {
                          SDL_SetWindowFullscreen(sdl_window, 0);
@@ -341,7 +386,7 @@ index 022b1baa..887938f3 100644
                          host_osd_push("Windowed", 1500);
                      } else {
                          /* If the configured mode is "off", the hotkey still
-@@ -6739,8 +6770,27 @@ static NetplayVblankEpilogue sdl_vblank_present_body(void) {
+@@ -6739,8 +6779,28 @@ static NetplayVblankEpilogue sdl_vblank_present_body(void) {
  
      /* Turbo-active test shared by the pacing/present gate below. */
      int turbo_loads_active = 0;
@@ -365,12 +410,13 @@ index 022b1baa..887938f3 100644
 +    }
      int logical_load_active = fntrace_is_game_started() &&
 -        (cdrom_load_in_progress() || cdrom_savestate_cd_wait_active());
-+        (cdrom_load_in_progress() || cdrom_savestate_cd_wait_active() ||
-+         s_mc_hold > 0);
++        ((cdrom_load_in_progress() &&
++          cdrom_current_burst_span() >= TURBO_LOADS_MIN_BURST_FRAMES) ||
++         cdrom_savestate_cd_wait_active() || s_mc_hold > 0);
      int load_run_value = 0;
      static int load_run = 0;
      static int release_run = 0;
-@@ -13356,9 +13406,16 @@ session_reboot:
+@@ -13356,9 +13416,16 @@ session_reboot:
          g_video_perspective_texturing = (*e && *e != '0') ? 1 : 0;
      if (const char* e = std::getenv("PSX_PGXP_CPU_MODE"))
          g_video_pgxp_cpu_mode = (*e && *e != '0') ? 1 : 0;
