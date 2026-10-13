@@ -103,6 +103,9 @@ assistant, via Claude Code). Claude helped with:
 
 All changes were tested in-game by the project owner.
 
+If you take issue with AI-assisted recompilations, that's fine: you're free
+to use something else or make your own.
+
 ## Legal
 
 You must own the original game. Disc images, BIOS dumps, saves, overlay
