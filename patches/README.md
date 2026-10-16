@@ -14,3 +14,7 @@
 | `main.cpp` | `[video]` config adds to, but no longer cancels, an enabled PGXP mod | Otherwise the Mods-page PGXP switch does nothing |
 | `host_keymap.c` | Hotkey modifiers match either Left or Right Alt/Ctrl/Shift | Alt+Enter and Ctrl+F never fired |
 | `main.cpp` | Leaving fullscreen maximises the window | It otherwise dropped to a small fixed-size window (tiny on high-DPI displays) |
+| `gpu.c` | Native widescreen no longer widens full-display flat rects in VRAM (`ws_expand_fullscreen_rect` removed; the renderers already extend them across the wide surface) | Before each FMV the game clears 480×448 at (0,0); widened to x −53..533 it wiped VRAM x 480–532, leaving white strips on a town house and invisible NPC sprites (Wreath) after a new game |
+| `gpu_gl_renderer.c` | Entering 24-bit mode flushes queued uploads before discarding the queue | They were dropped from the FBO when it was clean; a later readback then lost them from CPU VRAM too |
+| `main.cpp`, `spu.{c,h}` | Fast Loading discards accelerated audio when uncapped too, and the first SPU key-on during an accelerated disc load ends acceleration for that load | Area music that starts mid-load played sped up |
+| `gpu.{c,h}`, `gpu_gl_renderer.h`, `debug_server.c` | Debug only: `vram_upload_ring` / `vram_upload_get` (recent GP0(A0) uploads with pixels), depth24 events in `gl_coh_ring`, load episodes in `turbo_loads` | Diagnosing texture loss and the music release |

@@ -14,6 +14,53 @@ index df5cb346..2504f8ed 100644
  /* Physical non-XA data-read command state, without the logical load gap
   * bridge used by cdrom_load_in_progress(). Diagnostics only. */
  int cdrom_data_read_active(void);
+diff --git a/runtime/include/gpu.h b/runtime/include/gpu.h
+index c831f207..e2d4803e 100644
+--- a/runtime/include/gpu.h
++++ b/runtime/include/gpu.h
+@@ -127,6 +127,26 @@ typedef struct {
+     uint32_t csp;           /* raw guest $sp at copy time (diagnostic) */
+ } GpuGp0RingEntry;
+ 
++/* Always-on CPU→VRAM upload ring: last GPU_VRAM_UPLOAD_RING_CAP GP0(A0)
++ * transfers with the guest-sent pixels (pre-mask), capped per entry. */
++#define GPU_VRAM_UPLOAD_RING_CAP    512
++#define GPU_VRAM_UPLOAD_RING_MAX_PX 4096   /* one 32x128 texture tile */
++typedef struct GpuVramUploadInfo {
++    uint32_t seq;
++    uint32_t frame;
++    uint32_t func;          /* g_debug_current_func_addr at the A0 header */
++    uint16_t x, y, w, h;
++    uint32_t px_seen;       /* pixels received so far */
++    uint32_t px_stored;     /* pixels kept (<= GPU_VRAM_UPLOAD_RING_MAX_PX) */
++    uint32_t mask_skipped;  /* pixels dropped by the check-mask rule */
++    uint8_t  set_mask;      /* GP0(E6) state while the payload arrived */
++    uint8_t  check_mask;
++    uint8_t  complete;      /* payload fully received and committed */
++} GpuVramUploadInfo;
++uint32_t gpu_vram_upload_ring_total(void);
++int      gpu_vram_upload_ring_get(uint32_t seq, GpuVramUploadInfo *info,
++                                  const uint16_t **px);
++
+ uint64_t gpu_gp0_ring_total(void);
+ uint32_t gpu_gp0_ring_capacity(void);
+ uint32_t gpu_gp0_ring_max_words(void);
+diff --git a/runtime/include/gpu_gl_renderer.h b/runtime/include/gpu_gl_renderer.h
+index 26aa5417..52af75ec 100644
+--- a/runtime/include/gpu_gl_renderer.h
++++ b/runtime/include/gpu_gl_renderer.h
+@@ -158,6 +158,11 @@ enum {
+     GL_COH_UPLOAD   = 9,   /* bulk CPU->VRAM transfer_in dest rect    */
+     GL_COH_PEEK     = 10,  /* gl_fbo_peek probe (perturbs: flushes)   */
+     GL_COH_DIFF     = 11,  /* gl_vram_diff probe (perturbs: flushes)  */
++    /* Local patch (AzureDreamsRecomp): depth24 (24-bit FMV) upload policy. */
++    GL_COH_D24_ENTER = 12, /* display entered 24-bit (scanout band)   */
++    GL_COH_D24_LEAVE = 13, /* display left 24-bit (scanout band)      */
++    GL_COH_D24_SKIP  = 14, /* transfer kept out of the FBO (dest rect) */
++    GL_COH_D24_CLEAR = 15, /* clear-on-leave rect actually wiped      */
+ };
+ 
+ typedef struct {
 diff --git a/runtime/include/gpu_render.h b/runtime/include/gpu_render.h
 index ace31f11..16cde508 100644
 --- a/runtime/include/gpu_render.h
@@ -56,6 +103,19 @@ index b943aab6..2d423278 100644
  /* 1 while a card txn/protocol is live or a card ACK just fired. interrupts.c
   * uses this to defer in-exception ChangeThread so the game's SIO IntRP can
   * finish its A6C10/B4E38 handshake (Ape Escape LOAD). */
+diff --git a/runtime/include/spu.h b/runtime/include/spu.h
+index 31bf7b96..2f3fd9af 100644
+--- a/runtime/include/spu.h
++++ b/runtime/include/spu.h
+@@ -29,6 +29,8 @@ typedef struct SpuDebugInfo {
+ } SpuDebugInfo;
+ 
+ void spu_debug_info(SpuDebugInfo* out);
++/* Voices keyed on since reset (cheap read; host-side observation only). */
++uint32_t spu_key_on_total(void);
+ 
+ /* ---- Per-voice register snapshot. Mirrors the fields the Beetle oracle
+  * exposes via PS_SPU::GetRegister(GSREG_V0_*) so both backends produce a
 diff --git a/runtime/src/cdrom.c b/runtime/src/cdrom.c
 index 73884657..ba917aa8 100644
 --- a/runtime/src/cdrom.c
@@ -85,11 +145,220 @@ index 73884657..ba917aa8 100644
  int cdrom_data_read_active(void) {
      return reading && !xa_stream_active;
  }
+diff --git a/runtime/src/debug_server.c b/runtime/src/debug_server.c
+index 77b67764..ad80271a 100644
+--- a/runtime/src/debug_server.c
++++ b/runtime/src/debug_server.c
+@@ -6126,6 +6126,81 @@ static void handle_gpu_ring_stats(int id, const char *json)
+              oldest, newest);
+ }
+ 
++/* CPU→VRAM upload ring (gpu.c). vram_upload_ring lists entries with
++ * seq >= "since" (default: the newest 64) whose rect overlaps the optional
++ * filter rect x0,y0..x1,y1 (inclusive), at most "n" of them. vram_upload_get
++ * returns one entry's guest-sent pixels as hex halfwords, row-major. */
++static void handle_vram_upload_ring(int id, const char *json)
++{
++    const uint32_t total = gpu_vram_upload_ring_total();
++    const uint32_t oldest = total > GPU_VRAM_UPLOAD_RING_CAP
++                          ? total - GPU_VRAM_UPLOAD_RING_CAP : 0;
++    int since = json_get_int(json, "since", (int)(total > 64 ? total - 64 : 0));
++    int n = json_get_int(json, "n", 256);
++    const int x0 = json_get_int(json, "x0", 0), y0 = json_get_int(json, "y0", 0);
++    const int x1 = json_get_int(json, "x1", 1023), y1 = json_get_int(json, "y1", 511);
++    if (n < 1) n = 1;
++    if (n > GPU_VRAM_UPLOAD_RING_CAP) n = GPU_VRAM_UPLOAD_RING_CAP;
++    uint32_t seq = since < 0 ? 0u : (uint32_t)since;
++    if (seq < oldest) seq = oldest;
++
++    size_t bufsz = 256u + (size_t)n * 256u;
++    char *buf = (char *)malloc(bufsz);
++    if (!buf) { send_err(id, "alloc failed"); return; }
++    size_t pos = (size_t)snprintf(buf, bufsz,
++        "{\"id\":%d,\"ok\":true,\"total\":%u,\"oldest\":%u,\"entries\":[",
++        id, total, oldest);
++    int emitted = 0;
++    for (; seq < total && emitted < n; seq++) {
++        GpuVramUploadInfo e;
++        if (!gpu_vram_upload_ring_get(seq, &e, NULL)) continue;
++        /* Rect overlap test; uploads wrap at the VRAM edge, ignored here. */
++        if (e.x > x1 || e.x + e.w - 1 < x0 || e.y > y1 || e.y + e.h - 1 < y0)
++            continue;
++        pos += (size_t)snprintf(buf + pos, bufsz - pos,
++            "%s{\"seq\":%u,\"frame\":%u,\"func\":\"0x%08X\",\"x\":%u,\"y\":%u,"
++            "\"w\":%u,\"h\":%u,\"px_seen\":%u,\"px_stored\":%u,"
++            "\"mask_skipped\":%u,\"set_mask\":%u,\"check_mask\":%u,"
++            "\"complete\":%u}",
++            emitted ? "," : "", e.seq, e.frame, e.func, e.x, e.y, e.w, e.h,
++            e.px_seen, e.px_stored, e.mask_skipped, e.set_mask, e.check_mask,
++            e.complete);
++        emitted++;
++    }
++    snprintf(buf + pos, bufsz - pos, "],\"next\":%u}", seq);
++    debug_server_send_line(buf);
++    free(buf);
++}
++
++static void handle_vram_upload_get(int id, const char *json)
++{
++    const int seq = json_get_int(json, "seq", -1);
++    GpuVramUploadInfo e;
++    const uint16_t *px = NULL;
++    if (seq < 0 || !gpu_vram_upload_ring_get((uint32_t)seq, &e, &px)) {
++        send_err(id, "seq not in ring"); return;
++    }
++    size_t bufsz = 512u + (size_t)e.px_stored * 4u;
++    char *buf = (char *)malloc(bufsz);
++    if (!buf) { send_err(id, "alloc failed"); return; }
++    size_t pos = (size_t)snprintf(buf, bufsz,
++        "{\"id\":%d,\"ok\":true,\"seq\":%u,\"frame\":%u,\"func\":\"0x%08X\","
++        "\"x\":%u,\"y\":%u,\"w\":%u,\"h\":%u,\"px_seen\":%u,\"px_stored\":%u,"
++        "\"mask_skipped\":%u,\"set_mask\":%u,\"check_mask\":%u,\"complete\":%u,"
++        "\"hex\":\"",
++        id, e.seq, e.frame, e.func, e.x, e.y, e.w, e.h, e.px_seen,
++        e.px_stored, e.mask_skipped, e.set_mask, e.check_mask, e.complete);
++    static const char hexd[] = "0123456789abcdef";
++    for (uint32_t i = 0; i < e.px_stored; i++) {
++        const uint16_t p = px[i];
++        buf[pos++] = hexd[(p >> 12) & 15]; buf[pos++] = hexd[(p >> 8) & 15];
++        buf[pos++] = hexd[(p >> 4) & 15];  buf[pos++] = hexd[p & 15];
++    }
++    snprintf(buf + pos, bufsz - pos, "\"}");
++    debug_server_send_line(buf);
++    free(buf);
++}
++
+ static void handle_gpu_frame_dump(int id, const char *json)
+ {
+     int target = json_get_int(json, "frame", -1);
+@@ -9129,6 +9204,10 @@ static const char *gl_coh_kind_name(int k)
+     case GL_COH_UPLOAD:   return "upload";
+     case GL_COH_PEEK:     return "peek";
+     case GL_COH_DIFF:     return "diff";
++    case GL_COH_D24_ENTER: return "d24_enter";
++    case GL_COH_D24_LEAVE: return "d24_leave";
++    case GL_COH_D24_SKIP:  return "d24_skip";
++    case GL_COH_D24_CLEAR: return "d24_clear";
+     default:              return "?";
+     }
+ }
+@@ -11759,13 +11838,29 @@ static void handle_turbo_loads(int id, const char *json)
+     extern int      g_turbo_loads_enabled;
+     extern uint64_t g_turbo_loads_frames;
+     extern int      fntrace_is_game_started(void);
++    /* Local patch (AzureDreamsRecomp): music-start release episodes
++     * [first load frame, music key-on frame (0 = none), close frame
++     * (0 = open), turbo frames], oldest first (main.cpp). */
++    extern uint32_t g_turbo_episodes[32][4];
++    extern uint32_t g_turbo_episode_total;
+     int n = json_get_int(json, "n", -1);
+     if (n == 0 || n == 1) g_turbo_loads_enabled = n;
++    char eps[32 * 64] = "";
++    size_t ep_pos = 0;
++    const uint32_t ep_first = g_turbo_episode_total > 32
++                            ? g_turbo_episode_total - 32 : 0;
++    for (uint32_t i = ep_first; i < g_turbo_episode_total; i++) {
++        const uint32_t *e = g_turbo_episodes[i % 32];
++        ep_pos += (size_t)snprintf(eps + ep_pos, sizeof eps - ep_pos,
++                                   "%s[%u,%u,%u,%u]", i > ep_first ? "," : "",
++                                   e[0], e[1], e[2], e[3]);
++    }
+     send_fmt("{\"id\":%d,\"ok\":true,\"enabled\":%d,\"load_active\":%d,"
+-             "\"game_started\":%d,\"turbo_frames\":%llu}\n",
++             "\"game_started\":%d,\"turbo_frames\":%llu,"
++             "\"episodes\":[%s]}\n",
+              id, g_turbo_loads_enabled, cdrom_load_in_progress(),
+              fntrace_is_game_started(),
+-             (unsigned long long)g_turbo_loads_frames);
++             (unsigned long long)g_turbo_loads_frames, eps);
+ }
+ 
+ /* turbo_audio_sink: opt-in host-output discard while turbo loads run. Guest
+@@ -13752,6 +13847,8 @@ static const CmdEntry s_commands[] = {
+     { "wide_shot",         handle_wide_shot },
+     { "gpu_opcodes",       handle_gpu_opcodes },
+     { "gpu_ring_stats",    handle_gpu_ring_stats },
++    { "vram_upload_ring",  handle_vram_upload_ring },
++    { "vram_upload_get",   handle_vram_upload_get },
+     { "gpu_frame_dump",    handle_gpu_frame_dump },
+     { "a0_history",        handle_a0_history },
+     { "c0_history",        handle_c0_history },
 diff --git a/runtime/src/gpu.c b/runtime/src/gpu.c
-index 8d91f79a..49c65121 100644
+index 8d91f79a..dcff801f 100644
 --- a/runtime/src/gpu.c
 +++ b/runtime/src/gpu.c
-@@ -2486,6 +2486,37 @@ static int ws_is_fb_base(uint32_t bx) {
+@@ -2020,18 +2020,15 @@ static int32_t ws_disp_h(void) {
+     return di.height ? (int32_t)di.height : 240;
+ }
+ 
+-/* Full-screen fades and environmental filters are authored as 320x240 TILEs.
+- * In native-wide mode, grow only primitives that cover the complete native
+- * display; ordinary world-space rectangles remain untouched. */
+-static void ws_expand_fullscreen_rect(int32_t *x, int32_t y, int *w, int h) {
+-    if (!ws_native_wide_active()) return;
+-    int X = (int)ws_disp_x(), W = (int)ws_disp_w(), H = (int)ws_disp_h();
+-    if (*x <= X && *x + *w >= X + W && y <= 0 && y + h >= H) {
+-        int off = ws_nw_offset();
+-        *x -= off;
+-        *w += 2 * off;
+-    }
+-}
++/* Local patch (AzureDreamsRecomp): ws_expand_fullscreen_rect removed. It grew
++ * full-display rects by the native-wide offset on BOTH sides in canonical VRAM,
++ * so a rect wider than the display was written past its real right edge. Azure
++ * Dreams clears 480x448 at (0,0) with GP0(60) before each FMV; widened to
++ * x -53..533 it zeroed VRAM x 480..532 -- texture pages a PS1 never touches
++ * there (house wall strips, invisible NPC sprites after the new-game intro).
++ * The renderers already extend a full-display flat rect across the wide
++ * surface themselves (gpu_flat_rect / sw_draw_flat_rect, same coverage test),
++ * so the canonical write now stays exactly what the PS1 draws. */
+ 
+ /* In-game HUD pivot for an untagged screen-space SPRT spanning [x, x+w).
+  * Only reached during gameplay (ws_active true). HUD elements are sparse and
+@@ -2326,7 +2323,42 @@ static int      s_d24_present_hold = 0; /* vblanks to skip Swap after GP1(07h) *
+ static uint32_t s_d24_prev_disp_h = 0;  /* last GP1(07h) band height */
+ static void depth24_note_upload(uint32_t x, uint32_t w);
+ 
++/* Always-on CPU→VRAM upload ring (debug commands vram_upload_ring /
++ * vram_upload_get). Keeps the last GPU_VRAM_UPLOAD_RING_CAP GP0(A0) transfers
++ * with the pixels the guest actually SENT (before mask-bit handling), so a
++ * missing or garbled texture can be attributed after the fact: "the game sent
++ * it empty" vs "it was sent and lost in the GPU". Payload is capped per entry
++ * (px_stored < px_seen marks truncation). Host-side observation only. */
++static GpuVramUploadInfo s_upl_info[GPU_VRAM_UPLOAD_RING_CAP];
++static uint16_t s_upl_px[GPU_VRAM_UPLOAD_RING_CAP][GPU_VRAM_UPLOAD_RING_MAX_PX];
++static uint32_t s_upl_total = 0;
++static GpuVramUploadInfo *s_upl_cur = NULL;
++
++static void vram_upload_ring_begin(void) {
++    GpuVramUploadInfo *e = &s_upl_info[s_upl_total % GPU_VRAM_UPLOAD_RING_CAP];
++    memset(e, 0, sizeof(*e));
++    e->seq = s_upl_total++;
++    e->frame = (uint32_t)s_frame_count;
++    e->func = g_debug_current_func_addr;
++    e->x = vram_write_x; e->y = vram_write_y;
++    e->w = vram_write_w; e->h = vram_write_h;
++    s_upl_cur = e;
++}
++
++uint32_t gpu_vram_upload_ring_total(void) { return s_upl_total; }
++
++int gpu_vram_upload_ring_get(uint32_t seq, GpuVramUploadInfo *info,
++                             const uint16_t **px) {
++    if (seq >= s_upl_total ||
++        s_upl_total - seq > GPU_VRAM_UPLOAD_RING_CAP) return 0;
++    const uint32_t slot = seq % GPU_VRAM_UPLOAD_RING_CAP;
++    if (info) *info = s_upl_info[slot];
++    if (px) *px = s_upl_px[slot];
++    return 1;
++}
++
+ static void gp0_commit_cpu_to_vram(void) {
++    if (s_upl_cur) { s_upl_cur->complete = 1; s_upl_cur = NULL; }
+     for (uint32_t row = 0; row < vram_write_h; row++)
+         for (uint32_t col = 0; col < vram_write_w; col++)
+             vram_write_pixels[row * vram_write_w + col] =
+@@ -2486,6 +2518,37 @@ static int ws_is_fb_base(uint32_t bx) {
      return 0;
  }
  
@@ -127,7 +396,7 @@ index 8d91f79a..49c65121 100644
  static void split_trace_reset(GpuVerticalSplitTrace *trace) {
      memset(trace, 0, sizeof(*trace));
  }
-@@ -2560,8 +2591,18 @@ static void ws_nw_sync_target(void) {
+@@ -2560,8 +2623,18 @@ static void ws_nw_sync_target(void) {
          return;
      }
      uint32_t base = draw_area_left;
@@ -148,7 +417,35 @@ index 8d91f79a..49c65121 100644
  }
  
  static void ws_clear_all_reveal_margins(void) {
-@@ -4349,8 +4390,7 @@ static void gp0_exec_draw_area_tl(void) {
+@@ -3658,8 +3731,9 @@ static void gp0_exec_mono_quad(void) {
+     /* Full-screen filters are commonly encoded as an axis-aligned quad. Drawing
+      * a semi-transparent quad as two independent triangles blends their shared
+      * diagonal twice; render the equivalent rectangle once to avoid that seam.
+-     * The full-screen helper also grows the native 320-wide filter across the
+-     * sidecar surface in native-wide mode. Ordinary world quads are unchanged. */
++     * In native-wide mode the renderer's flat-rect path grows the native
++     * 320-wide filter across the sidecar surface. Ordinary world quads are
++     * unchanged. */
+     if (vx[0] == vx[2] && vx[1] == vx[3] &&
+         vy[0] == vy[1] && vy[2] == vy[3] &&
+         vx[1] > vx[0] && vy[2] > vy[0] &&
+@@ -3669,7 +3743,6 @@ static void gp0_exec_mono_quad(void) {
+         int32_t y = vy[0];
+         int w = (int)(vx[1] - vx[0]);
+         int h = (int)(vy[2] - vy[0]);
+-        ws_expand_fullscreen_rect(&x, y, &w, h);
+         x += draw_offset_x;
+         y += draw_offset_y;
+         gr_set_semi_transparency(semi_trans, (int)semi_transparency);
+@@ -4116,7 +4189,6 @@ static void gp0_exec_mono_rect(void) {
+     int h = (gp0_cmd_buf[2] >> 16) & 0xFFFFu;
+     if (w > 1023) w = 1023;
+     if (h > 511)  h = 511;
+-    ws_expand_fullscreen_rect(&x0, y0, &w, h);
+     /* Same auto_ui squash the textured rect path gets. Without it a flat
+      * -coloured HUD mark keeps its 4:3 X while the textured primitives of the
+      * same widget move toward their anchor, so at a wide aspect it is left
+@@ -4349,8 +4421,7 @@ static void gp0_exec_draw_area_tl(void) {
      draw_area_left = param & 0x3FF;
      draw_area_top  = (param >> 10) & 0x3FF;
      split_trace_note_draw_area();
@@ -158,7 +455,7 @@ index 8d91f79a..49c65121 100644
      ws_nw_sync_target();  /* back buffer (draw_area_left) → wide mirror surface */
  }
  
-@@ -4362,8 +4402,7 @@ static void gp0_exec_draw_area_br(void) {
+@@ -4362,8 +4433,7 @@ static void gp0_exec_draw_area_br(void) {
      draw_area_right  = param & 0x3FF;
      draw_area_bottom = (param >> 10) & 0x3FF;
      split_trace_note_draw_area();
@@ -168,7 +465,35 @@ index 8d91f79a..49c65121 100644
      ws_nw_sync_target();  /* back buffer (draw_area_left) → wide mirror surface */
  }
  
-@@ -5939,8 +5978,7 @@ int gpu_snapshot_read(const uint8_t *p, uint32_t len) {
+@@ -4496,6 +4566,7 @@ static void gp0_exec_cpu_to_vram(void) {
+         a0_capture_slot = slot;
+     }
+ 
++    vram_upload_ring_begin();
+     vram_write_col = 0;
+     vram_write_row = 0;
+ 
+@@ -5418,10 +5489,19 @@ static void gpu_write_gp0_body(uint32_t val) {
+             uint16_t wx = (vram_write_x + vram_write_col) % 1024;
+             uint16_t wy = (vram_write_y + vram_write_row) % 512;
+ 
++            if (s_upl_cur) {
++                if (s_upl_cur->px_stored < GPU_VRAM_UPLOAD_RING_MAX_PX)
++                    s_upl_px[s_upl_cur - s_upl_info][s_upl_cur->px_stored++] = pixel;
++                s_upl_cur->px_seen++;
++                s_upl_cur->set_mask = (uint8_t)(set_mask_bit != 0);
++                s_upl_cur->check_mask = (uint8_t)(check_mask_bit != 0);
++            }
++
+             /* Respect mask bit settings. The check reads through the facade:
+              * under the GL backend GPU-drawn mask bits live in the FBO, not
+              * the CPU array (one sync per burst; free when check is off). */
+             if (check_mask_bit && (gr_vram_read((int)wx, (int)wy) & 0x8000)) {
++                if (s_upl_cur) s_upl_cur->mask_skipped++;
+                 goto next_pixel;
+             }
+ 
+@@ -5939,8 +6019,7 @@ int gpu_snapshot_read(const uint8_t *p, uint32_t len) {
      if (!gpu_snap_parse(&r)) return 0;
      /* Sync renderer clip/scissor to restored GP0(E3/E4); vars alone leave GL
       * on a stale draw area after savestate load. */
@@ -179,7 +504,7 @@ index 8d91f79a..49c65121 100644
      return 1;
  }
 diff --git a/runtime/src/gpu_gl_renderer.c b/runtime/src/gpu_gl_renderer.c
-index 3312551e..a6db2d57 100644
+index 3312551e..27697e88 100644
 --- a/runtime/src/gpu_gl_renderer.c
 +++ b/runtime/src/gpu_gl_renderer.c
 @@ -513,6 +513,11 @@ static int    g_wide_w        = 0;           /* wide width (native px); 0 = disa
@@ -212,7 +537,67 @@ index 3312551e..a6db2d57 100644
      }
      p_glUniform1f(uXoff, (float)dx);
      p_glUniform1f(uXhalf, (float)g_wide_w / 2.0f);
-@@ -3391,13 +3405,29 @@ static void glb_wide_set_target(int base_x) {
+@@ -2481,6 +2495,20 @@ static int depth24_is_fb_transfer(int x, int y, int w, int h) {
+  * full-VRAM savestate restage so texture pages stay in the FBO while the
+  * RGB888 movie band is still wiped when GP1 leaves 24-bit (avoids MotK
+  * rainbow/static from treating packed RGB as 1555). */
++/* Local patch (AzureDreamsRecomp): current scanout band, for the coherency
++ * ring's d24_enter/d24_leave events (same arithmetic as below). */
++static void depth24_scanout_band(int *x0, int *y0, int *x1, int *y1) {
++    GpuDisplayInfo di;
++    gpu_get_display_info(&di);
++    int fb_w = (int)((di.width * 3u + 1u) / 2u), fb_h = (int)di.height;
++    if (fb_w < 8) fb_w = 8;
++    if (fb_h < 1) fb_h = 1;
++    *x0 = (int)(di.display_x & 1023u);
++    *y0 = (int)(di.display_y & 511u);
++    *x1 = *x0 + fb_w - 1;
++    *y1 = *y0 + fb_h - 1;
++}
++
+ static void depth24_mark_scanout_band(void) {
+     GpuDisplayInfo di;
+     int fb_w, fb_h, x0, y0, x1, y1;
+@@ -2507,6 +2535,7 @@ static void depth24_clear_skipped_fb(void) {
+     int x1 = s_d24_skip_fb.x1, y1 = s_d24_skip_fb.y1;
+     int rw = x1 - x0 + 1, rh = y1 - y0 + 1;
+     int S = s_scale;
++    coh_record(GL_COH_D24_CLEAR, x0, y0, x1, y1);
+     p_glBindFramebuffer(PSXGL_FRAMEBUFFER, s_hr_fbo);
+     glDisable(GL_BLEND);
+     glDisable(GL_STENCIL_TEST);
+@@ -2544,10 +2573,21 @@ static void depth24_upload_policy(void) {
+          * top/bottom bars and flicker between double-buffered movie frames.
+          * Cost is one full-VRAM readback per 24-bit entry, not per frame, and
+          * ensure_cpu is a no-op when the FBO is already clean. */
++        /* Local patch (AzureDreamsRecomp): land queued uploads first.
++         * ensure_cpu() returns early when the FBO is clean, and the old
++         * `s_up_nrects = 0` then dropped those uploads from the FBO and raw
++         * mirror for good (a later readback wiped them from CPU too). */
++        flush_cpu_upload();
+         ensure_cpu();
+         s_up_nrects = 0;
+         rect_clear(&s_d24_skip_fb);
++        {   int bx0, by0, bx1, by1;
++            depth24_scanout_band(&bx0, &by0, &bx1, &by1);
++            coh_record(GL_COH_D24_ENTER, bx0, by0, bx1, by1); }
+     } else if (!d24 && s_depth24_skip_up) {
++        {   int bx0, by0, bx1, by1;
++            depth24_scanout_band(&bx0, &by0, &bx1, &by1);
++            coh_record(GL_COH_D24_LEAVE, bx0, by0, bx1, by1); }
+         /* Small texture uploads are still queued while depth24 scanout uses
+          * the CPU mirror. Clear only the skipped movie band first, then land
+          * those newer uploads so texture pages which overlap that band win in
+@@ -2587,7 +2627,7 @@ static void glb_vram_transfer_in(int x,int y,int w,int h,const uint16_t *d){
+             return;
+         }
+         depth24_mark_scanout_band();
+-        coh_record(GL_COH_UPLOAD, x, y, x+w-1, y+h-1);
++        coh_record(GL_COH_D24_SKIP, x, y, x+w-1, y+h-1);
+         return;
+     }
+     up_add_transfer(x, y, w, h);   /* exact touched rects, incl. per-pixel wrap */
+@@ -3391,13 +3431,29 @@ static void glb_wide_set_target(int base_x) {
      if (!s_raster_ok) { g_wide_cur = 0; return; }
      double t0 = cw_ms(); s_cw_wide_sets++;
      flush_tex_batch();   /* drain into the OLD target before switching */
@@ -243,7 +628,7 @@ index 3312551e..a6db2d57 100644
  
  /* Mirror a framebuffer clear: fill the full wide width over [y, y+h) of the
   * surface for base_x, so the revealed margins are clean. Mirrors sw_wide_clear:
-@@ -4501,6 +4531,7 @@ static const GpuRenderBackend GL_BACKEND = {
+@@ -4501,6 +4557,7 @@ static const GpuRenderBackend GL_BACKEND = {
      .wide_clear_margins = glb_wide_clear_margins,
      .render_wide_display = glb_render_wide_display,
      .wide_dump_full = glb_wide_dump_full,
@@ -309,7 +694,7 @@ index 848309e2..7eb04344 100644
      return 0;
  }
 diff --git a/runtime/src/main.cpp b/runtime/src/main.cpp
-index 022b1baa..8a39e1cb 100644
+index 022b1baa..343e9730 100644
 --- a/runtime/src/main.cpp
 +++ b/runtime/src/main.cpp
 @@ -1,4 +1,4 @@
@@ -336,7 +721,21 @@ index 022b1baa..8a39e1cb 100644
  static int aspect_gcd(int a, int b) {
      while (b) { int t = a % b; a = b; b = t; }
      return a > 0 ? a : 1;
-@@ -2058,6 +2069,15 @@ static int g_turbo_audio_sink_config_enabled = 0;
+@@ -2048,6 +2059,13 @@ uint64_t g_turbo_loads_frames  = 0;   /* vblanks run unpaced (observability) */
+ int      g_turbo_audio_sink_enabled = 0;
+ int      g_turbo_audio_sink_active = 0;
+ uint64_t g_turbo_audio_sink_frames = 0; /* guest SPU frames advanced, not queued */
++/* Local patch (AzureDreamsRecomp): load episodes for the music-start release
++ * (see TURBO_MUSIC_IDLE_CLOSE_FRAMES). Ring of the last TURBO_EPISODE_CAP
++ * loads: {first load frame, first key-on-during-turbo frame (0 = none),
++ * closing frame (0 = open), turbo frames}. Read by the turbo_loads command. */
++#define TURBO_EPISODE_CAP 32
++uint32_t g_turbo_episodes[TURBO_EPISODE_CAP][4];
++uint32_t g_turbo_episode_total = 0;
+ }
+ static int g_turbo_audio_sink_config_enabled = 0;
+ /* The CD predicate already excludes XA and holds across ordinary inter-file
+@@ -2058,6 +2076,24 @@ static int g_turbo_audio_sink_config_enabled = 0;
   * advancing normally. */
  #define TURBO_LOADS_ENGAGE_FRAMES  4
  #define TURBO_LOADS_RELEASE_FRAMES 6
@@ -349,10 +748,19 @@ index 022b1baa..8a39e1cb 100644
 + * tower entry, return to town) span 435-495 frames, the largest in-play read
 + * 71, so 90 (1.5 s) separates them; real loads lose ~1.5 s of acceleration. */
 +#define TURBO_LOADS_MIN_BURST_FRAMES 90
++/* Local patch (AzureDreamsRecomp): music-start release. An area's music often
++ * starts while its load is still reading the disc; fast-forwarding past that
++ * point either plays the music sped up or (with the audio sink) skips its
++ * opening. So the first SPU key-on while turbo is running ends acceleration
++ * for the rest of that load, and the music plays from its first note at real
++ * speed. The load counts as over once the load predicate has been false for
++ * this many guest frames (longer than the CD predicate's own gap bridge, so a
++ * mid-load gap cannot re-engage turbo under the music). Pacing only. */
++#define TURBO_MUSIC_IDLE_CLOSE_FRAMES 60
  /* Zero multiplier retains the historical uncapped turbo behavior. */
  static int g_turbo_load_wall_multiplier = 0;
  static int g_turbo_load_release_frames = TURBO_LOADS_RELEASE_FRAMES;
-@@ -6562,6 +6582,12 @@ static NetplayVblankEpilogue sdl_vblank_present_body(void) {
+@@ -6562,6 +6598,12 @@ static NetplayVblankEpilogue sdl_vblank_present_body(void) {
                  psx_crash_trace_set_exit_origin("sdl_window_close");
                  shutdown_runtime();
                  std::exit(0);
@@ -365,7 +773,7 @@ index 022b1baa..8a39e1cb 100644
              } else if (ev.type == SDL_CONTROLLERDEVICEADDED) {
                  refresh_player_devices();
              } else if (ev.type == SDL_CONTROLLERDEVICEREMOVED) {
-@@ -6653,6 +6679,20 @@ static NetplayVblankEpilogue sdl_vblank_present_body(void) {
+@@ -6653,6 +6695,20 @@ static NetplayVblankEpilogue sdl_vblank_present_body(void) {
                                     SDL_WINDOW_FULLSCREEN;
                      if (is_fs) {
                          SDL_SetWindowFullscreen(sdl_window, 0);
@@ -386,10 +794,12 @@ index 022b1baa..8a39e1cb 100644
                          host_osd_push("Windowed", 1500);
                      } else {
                          /* If the configured mode is "off", the hotkey still
-@@ -6739,8 +6779,28 @@ static NetplayVblankEpilogue sdl_vblank_present_body(void) {
+@@ -6739,8 +6795,30 @@ static NetplayVblankEpilogue sdl_vblank_present_body(void) {
  
      /* Turbo-active test shared by the pacing/present gate below. */
      int turbo_loads_active = 0;
+-    int logical_load_active = fntrace_is_game_started() &&
+-        (cdrom_load_in_progress() || cdrom_savestate_cd_wait_active());
 +    /* Local patch (AzureDreamsRecomp): BULK memory-card transfers (writes, and
 +     * reads of sectors not recently read -- see sio_get_mc_bulk_count) also
 +     * count as a load for Fast Loading's host pacing, so in-game saves/loads
@@ -408,15 +818,75 @@ index 022b1baa..8a39e1cb 100644
 +            s_mc_hold--;
 +        s_mc_last_bulk = bulk;
 +    }
-     int logical_load_active = fntrace_is_game_started() &&
--        (cdrom_load_in_progress() || cdrom_savestate_cd_wait_active());
-+        ((cdrom_load_in_progress() &&
-+          cdrom_current_burst_span() >= TURBO_LOADS_MIN_BURST_FRAMES) ||
-+         cdrom_savestate_cd_wait_active() || s_mc_hold > 0);
++    const int cd_load_active = fntrace_is_game_started() &&
++        cdrom_load_in_progress() &&
++        cdrom_current_burst_span() >= TURBO_LOADS_MIN_BURST_FRAMES;
++    int logical_load_active = cd_load_active ||
++        (fntrace_is_game_started() &&
++         (cdrom_savestate_cd_wait_active() || s_mc_hold > 0));
      int load_run_value = 0;
      static int load_run = 0;
      static int release_run = 0;
-@@ -13356,9 +13416,16 @@ session_reboot:
+@@ -6768,6 +6846,44 @@ static NetplayVblankEpilogue sdl_vblank_present_body(void) {
+         load_run = 0;
+         release_run = 0;
+     }
++    {   /* Music-start release (see TURBO_MUSIC_IDLE_CLOSE_FRAMES). */
++        static uint32_t s_kon_last = 0;
++        static int s_episode_open = 0, s_music_hold = 0, s_idle_frames = 0;
++        const uint32_t kon = spu_key_on_total();
++        const uint32_t frame = (uint32_t)s_frame_count;
++        uint32_t *ep_rec = g_turbo_episodes[
++            (g_turbo_episode_total ? g_turbo_episode_total - 1 : 0) %
++            TURBO_EPISODE_CAP];
++        if (logical_load_active && !s_episode_open) {
++            s_episode_open = 1;
++            ep_rec = g_turbo_episodes[g_turbo_episode_total++ %
++                                      TURBO_EPISODE_CAP];
++            ep_rec[0] = frame; ep_rec[1] = 0; ep_rec[2] = 0; ep_rec[3] = 0;
++        }
++        if (s_episode_open) {
++            /* Disc loads only: memory-card saves/loads keep full speed even
++             * if a menu sound plays. */
++            if (turbo_loads_active && cd_load_active && kon != s_kon_last &&
++                !s_music_hold) {
++                s_music_hold = 1;
++                ep_rec[1] = frame;
++            }
++            if (s_music_hold) {
++                turbo_loads_active = 0;
++                load_run = 0;
++                release_run = 0;
++            }
++            if (turbo_loads_active) ep_rec[3]++;
++            s_idle_frames = logical_load_active ? 0 : s_idle_frames + 1;
++            if (s_idle_frames >= TURBO_MUSIC_IDLE_CLOSE_FRAMES) {
++                s_episode_open = 0;
++                s_music_hold = 0;
++                s_idle_frames = 0;
++                ep_rec[2] = frame;
++            }
++        }
++        s_kon_last = kon;
++    }
+     /* HLE boot-skip window: from reset until the game entry PC first
+      * dispatches, run unpaced so the (shell-skipped) BIOS kernel init +
+      * SYSTEM.CNF + game EXE load compress to host speed. This replaces the
+@@ -13138,8 +13254,11 @@ int main(int argc, char** argv) {
+         /* Fast Loading advances the guest at a host rate greater than real
+          * time. Keep the canonical SPU/CD stream running, but discard the
+          * accelerated presentation-side audio until pacing resumes; otherwise
+-         * the SDL bridge overflows and the load becomes observably unstable. */
+-        g_turbo_audio_sink_enabled = g_turbo_load_wall_multiplier > 1;
++         * the SDL bridge overflows and the load becomes observably unstable.
++         * Local patch (AzureDreamsRecomp): uncapped (multiplier 0) sinks too;
++         * excluding it played area music sped up whenever a load ran into
++         * the music start. Only multiplier 1 (authentic speed) keeps output. */
++        g_turbo_audio_sink_enabled = g_turbo_load_wall_multiplier != 1;
+         if (g_turbo_load_wall_multiplier) {
+             std::fprintf(stdout,
+                 "psxrecomp: mod selected %dx load acceleration "
+@@ -13356,9 +13475,16 @@ session_reboot:
          g_video_perspective_texturing = (*e && *e != '0') ? 1 : 0;
      if (const char* e = std::getenv("PSX_PGXP_CPU_MODE"))
          g_video_pgxp_cpu_mode = (*e && *e != '0') ? 1 : 0;
@@ -478,6 +948,19 @@ index 08dcadd0..4155c275 100644
  
          if (mc_cmd == 0x52) {
              if (mc_sector < MEMCARD_SECTORS) {
+diff --git a/runtime/src/spu.c b/runtime/src/spu.c
+index 0e3c0340..7b1a21f4 100644
+--- a/runtime/src/spu.c
++++ b/runtime/src/spu.c
+@@ -1312,6 +1312,8 @@ void spu_render(int16_t* out_stereo, int frames) {
+     audio_trace_pcm(AUDIO_TAP_SPU_OUT, out_stereo, frames);
+ }
+ 
++uint32_t spu_key_on_total(void) { return key_on_count; }
++
+ void spu_debug_info(SpuDebugInfo* out) {
+     if (!out) return;
+     memset(out, 0, sizeof(*out));
 diff --git a/tools/prepare_disc.py b/tools/prepare_disc.py
 index f3e39f28..2ef2fb77 100644
 --- a/tools/prepare_disc.py
