@@ -60,6 +60,13 @@ static const int16_t k_hud_left_stock_y[4] = { -138, -86, -138, -82 };
 #define MINIMAP_WIN_STOCK_Y 56
 #define MINIMAP_WIN_STOCK_W 107
 #define MINIMAP_WIN_STOCK_H 112
+/* Stock, the window reaches 64 px right of and above the map anchor (256, 120)
+ * but only 43 px left and 48 px below, so larger maps were cut off on the left
+ * and bottom. With the map on the wide edge the window is grown to 64 px on
+ * every side: x 192, w 128, h 128 (the right edge stays on the screen edge). */
+#define MINIMAP_WIN_WIDE_X  (MINIMAP_STOCK_X - 64)
+#define MINIMAP_WIN_WIDE_W  128
+#define MINIMAP_WIN_WIDE_H  128
 
 static void azure_widescreen_activate(void) {
     (void)psx_mod_set_fixed_display_aspect(16u, 9u);
@@ -107,12 +114,15 @@ static void azure_widescreen_minimap_entry(struct CPUState *cpu, uint32_t addres
     if ((win & 0xFFE00000u) != 0x80000000u ||
         (state & 0xFFE00000u) != 0x80000000u) return;   /* main RAM only */
 
-    /* Window: shift only an exact stock RECT (and its x copy at +12). */
+    /* Window: move and grow only an exact stock RECT (and shift its x copy at
+     * +12 as before). */
     if ((int16_t)psx_mod_read_half(win + 4u)  == MINIMAP_WIN_STOCK_X &&
         (int16_t)psx_mod_read_half(win + 6u)  == MINIMAP_WIN_STOCK_Y &&
         (int16_t)psx_mod_read_half(win + 8u)  == MINIMAP_WIN_STOCK_W &&
         (int16_t)psx_mod_read_half(win + 10u) == MINIMAP_WIN_STOCK_H) {
-        psx_mod_write_half(win + 4u, (uint16_t)(int16_t)(MINIMAP_WIN_STOCK_X + margin));
+        psx_mod_write_half(win + 4u, (uint16_t)(int16_t)(MINIMAP_WIN_WIDE_X + margin));
+        psx_mod_write_half(win + 8u, (uint16_t)MINIMAP_WIN_WIDE_W);
+        psx_mod_write_half(win + 10u, (uint16_t)MINIMAP_WIN_WIDE_H);
         if ((int16_t)psx_mod_read_half(win + 12u) == MINIMAP_WIN_STOCK_X)
             psx_mod_write_half(win + 12u, (uint16_t)(int16_t)(MINIMAP_WIN_STOCK_X + margin));
     }

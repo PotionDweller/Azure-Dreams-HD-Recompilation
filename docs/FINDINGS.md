@@ -15,7 +15,7 @@ in town and in the tower; hooks check stock values before changing anything.
 | GTE screen-extent rejects | immediates `0x181` (385) / `0x121` (289) | 320x224 + 32 px | widened by margin | `game.toml` `[widescreen.cull]` |
 | Left HUD panel (LV / HP) anchors | `0x800E2924`, 4 x `{int16 x, int16 y}` | x {-196, -140, -90, -34}, y {-138, -86, -138, -82} | x - m | `src/mod_widescreen.c` |
 | Dungeon minimap routine | `0x8009E798` (dungeon overlay) | prologue `0x27BDFFB8`, `+8` `0x00A0B021` | hooked at entry | `src/mod_widescreen.c` |
-| Minimap clip window | `$a0 + 4` RECT, copy of x at `$a0 + 12` | {213, 56, 107, 112} | x + m | `src/mod_widescreen.c` |
+| Minimap clip window | `$a0 + 4` RECT, copy of x at `$a0 + 12` | {213, 56, 107, 112} | → {192 + m, 56, 128, 128} | `src/mod_widescreen.c` |
 | Minimap content anchor | `$a1 + 2` (x), `$a1 + 6` (y) | 256, 120 | x + m | `src/mod_widescreen.c` |
 | Controller type | `game.toml` `[controller]` | — | `lock_mode = true` (digital) | `game.toml` |
 | Fast Loading engage | framework `main.cpp` | 4 frames | 90-frame CD burst; bulk memory-card transfers | `patches/` |
@@ -44,6 +44,19 @@ in town and in the tower; hooks check stock values before changing anything.
   alone. Found with `psxrecomp-analyze --scan-widescreen`.
 - **Not a width:** `0x1D6` (470) in `func_800453E0` bounds an object countdown
   at `obj+192`; widening it breaks gameplay timing.
+- **White wall strips / invisible NPCs after a new game (fixed):** before each
+  movie the game sets the draw area to all of VRAM and clears 480x448 at (0,0)
+  with a black GP0(60) rect, then reloads the textures it covered. The
+  framework's native-wide mode widened full-display rects by 53 px on both
+  sides in VRAM itself, so the clear also zeroed x 480–532: a town house's wall
+  texture (tpage x 512) and NPC sprites such as Wreath (tile 480,384), which
+  the game never reloads. The patch in `patches/` drops that widening; the
+  renderers already extend full-display rects across the wide surface. Loading
+  a save never hit it (no movie on that path).
+- **Top/bottom tiles at the highest camera:** the edge of the drawn area can
+  show at the top and bottom of the screen at the highest camera angle in
+  dungeons. Widescreen only widens the view, so this is probably the game's
+  own draw radius; not yet compared with widescreen off.
 
 ## Moving the UI
 
@@ -57,7 +70,9 @@ in town and in the tower; hooks check stock values before changing anything.
   reads them from the arguments: `$a0` holds the clip window, `$a1` the map
   state. Both x values move by `+m`. The window is a **draw-area clip inside
   the framebuffer**, which the framework's native-wide mode did not mirror; the
-  renderer patch in `patches/` adds that. At the most zoomed-out level the map
+  renderer patch in `patches/` adds that. Stock, the window reaches only 43 px
+  left of and 48 px below the map anchor (64 px right/up), cutting off larger
+  maps, so the mod also grows it to 64 px on every side. At the most zoomed-out level the map
   is small and centred in its window, so it does not touch the edge; that is
   the game's own layout.
 
@@ -79,6 +94,12 @@ in town and in the tower; hooks check stock values before changing anything.
   burst tail kept turbo on afterwards and fast-forwarded ~0.5 s of play. A CD
   read now only counts after 90 frames of continuous reading. Measured: real
   loads 435–495 frames (848–970 sectors), largest in-play read 71 frames.
+- **Sped-up load-in music (fixed):** area music often starts while its load is
+  still reading. Uncapped Fast Loading now discards accelerated audio, and the
+  first SPU key-on during an accelerated disc load ends acceleration for the
+  rest of that load, so the music plays from its first note at real speed.
+  Memory-card saves/loads keep full speed. `turbo_loads` lists recent loads
+  (start frame, music key-on frame, end frame, accelerated frames).
 
 ## Other facts
 
@@ -129,3 +150,8 @@ exposes the running game. Most useful commands:
 - `cdrom_bursts` — length and sector count of every disc read; tuned Fast
   Loading.
 - `screenshot` — in widescreen writes the full 16:9 frame to `psx_wide.png`.
+- `vram_upload_ring` / `vram_upload_get` — recent CPU→VRAM uploads with the
+  pixels the game sent; showed the house and Wreath textures arrived intact.
+- `gl_fbo_peek` — read the renderer's VRAM for a rect; sampled repeatedly it
+  caught the moment those textures were wiped. (It packs the rect as it reads,
+  so the probe's own rects show up in `gl_coh_ring`.)
