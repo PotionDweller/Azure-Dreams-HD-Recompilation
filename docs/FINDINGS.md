@@ -55,8 +55,8 @@ in town and in the tower; hooks check stock values before changing anything.
   a save never hit it (no movie on that path).
 - **Top/bottom tiles at the highest camera:** the edge of the drawn area can
   show at the top and bottom of the screen at the highest camera angle in
-  dungeons. Widescreen only widens the view, so this is probably the game's
-  own draw radius; not yet compared with widescreen off.
+  dungeons. Identical with widescreen off, so it is the game's own draw
+  radius, not a port bug. Widening it would be a new enhancement.
 
 ## Moving the UI
 
