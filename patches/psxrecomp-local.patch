@@ -1,3 +1,495 @@
+diff --git a/bios/OpenBIOS.toml b/bios/OpenBIOS.toml
+index de6a781b..7108ceda 100644
+--- a/bios/OpenBIOS.toml
++++ b/bios/OpenBIOS.toml
+@@ -81,6 +81,122 @@ runtime_base = "0x80030000"
+ dispatch_key = "rom"
+ kernel_bless = false
+ 
++# ---- Retail-ABI fixes (applied to the hashed image at recompile time) -------
++# A(1Ch) index / A(1Eh) strchr -> 0xBFC0596C and A(1Dh) rindex / A(1Fh) strrchr
++# -> 0xBFC0599C (read from the live A0 table at RAM 0x200). Retail behaviour
++# (psx-spx Kernel BIOS, "BIOS String Functions"): "Char may be 00h (returns
++# the end address of the string)", and src=00000000h returns 0. This OpenBIOS
++# build stops at the terminator before comparing, so a search for 00h returns
++# 0. Azure Dreams (SLUS-00614, func 0x8004DF8C) appends to a message buffer at
++# strrchr(buf, 0); with 0 it wrote its bytes to RAM 0x0..0xA, and a later
++# sprite-frame lookup miss read that as a 18432-part count and ran its
++# primitive writer through the stack into the vectors (fail-fast at
++# 0x00940000). Both routines are rewritten in place, same length, same entry:
++#   strchr:  if(!s) return 0; for(;;s++){ if(*s==c) return s; if(!*s) return 0; }
++#   strrchr: r=0; if(!s) return r; do{ if(*s==c) r=s; } while(*s++); return r;
++# Upstream fix belongs in pcsx-redux src/mips/openbios; drop these on a re-pin
++# that carries it (the expected-word guards will fail loudly if bytes moved).
++[[recompiler.patch]]
++id = "strchr-null-src"
++address = "0xBFC0596C"
++expected = "0x00801025"
++replacement = "0x10800008"   # beq a0,zero,ret
++[[recompiler.patch]]
++id = "strchr-1"
++address = "0xBFC05970"
++expected = "0x80430000"
++replacement = "0x00801025"   # (delay) or v0,a0,zero
++[[recompiler.patch]]
++id = "strchr-2"
++address = "0xBFC05974"
++expected = "0x00000000"
++replacement = "0x80430000"   # loop: lb v1,0(v0)
++[[recompiler.patch]]
++id = "strchr-3"
++address = "0xBFC05978"
++expected = "0x14600004"
++replacement = "0x00000000"   # nop (load delay)
++[[recompiler.patch]]
++id = "strchr-match-before-end"
++address = "0xBFC0597C"
++expected = "0x00000000"
++replacement = "0x10650004"   # beq v1,a1,ret  (matches the 00h terminator too)
++[[recompiler.patch]]
++id = "strchr-5"
++address = "0xBFC05980"
++expected = "0x00001025"
++replacement = "0x00000000"   # nop
++[[recompiler.patch]]
++id = "strchr-6"
++address = "0xBFC05984"
++expected = "0x03E00008"
++replacement = "0x1460FFFB"   # bne v1,zero,loop
++[[recompiler.patch]]
++id = "strchr-7"
++address = "0xBFC05988"
++expected = "0x00000000"
++replacement = "0x24420001"   # (delay) addiu v0,v0,1
++[[recompiler.patch]]
++id = "strchr-8"
++address = "0xBFC0598C"
++expected = "0x1065FFFD"
++replacement = "0x00001025"   # not found: or v0,zero,zero
++[[recompiler.patch]]
++id = "strchr-9"
++address = "0xBFC05990"
++expected = "0x00000000"
++replacement = "0x03E00008"   # ret: jr ra
++[[recompiler.patch]]
++id = "strchr-10"
++address = "0xBFC05994"
++expected = "0x1000FFF6"
++replacement = "0x00000000"   # (delay) nop
++[[recompiler.patch]]
++id = "strchr-11"
++address = "0xBFC05998"
++expected = "0x24420001"
++replacement = "0x00000000"   # unused
++[[recompiler.patch]]
++id = "strrchr-null-src"
++address = "0xBFC059A0"
++expected = "0x80830000"
++replacement = "0x10800008"   # beq a0,zero,ret  (v0 already 0)
++[[recompiler.patch]]
++id = "strrchr-load"
++address = "0xBFC059A8"
++expected = "0x14600003"
++replacement = "0x80830000"   # loop: lb v1,0(a0)
++[[recompiler.patch]]
++id = "strrchr-cmp"
++address = "0xBFC059B0"
++expected = "0x03E00008"
++replacement = "0x14650002"   # bne v1,a1,skip
++[[recompiler.patch]]
++id = "strrchr-record"
++address = "0xBFC059B8"
++expected = "0x14650002"
++replacement = "0x00801025"   # or v0,a0,zero  (00h terminator records the end)
++[[recompiler.patch]]
++id = "strrchr-loop"
++address = "0xBFC059BC"
++expected = "0x00000000"
++replacement = "0x1460FFFA"   # skip: bne v1,zero,loop
++[[recompiler.patch]]
++id = "strrchr-advance"
++address = "0xBFC059C0"
++expected = "0x00801025"
++replacement = "0x24840001"   # (delay) addiu a0,a0,1
++[[recompiler.patch]]
++id = "strrchr-ret"
++address = "0xBFC059C4"
++expected = "0x1000FFF6"
++replacement = "0x03E00008"   # ret: jr ra
++[[recompiler.patch]]
++id = "strrchr-ret-delay"
++address = "0xBFC059C8"
++expected = "0x24840001"
++replacement = "0x00000000"   # (delay) nop
++
+ # No [[recompiler.install_slots]]: none identified yet. Runtime-installed
+ # stubs fall to the dirty-RAM interpreter, which is correct (just slower)
+ # until a slot is identified and added.
+diff --git a/mods/builtin/packages/psx.enhancement.cpu-overclock/1.0.0/manifest.toml b/mods/builtin/packages/psx.enhancement.cpu-overclock/1.0.0/manifest.toml
+new file mode 100644
+index 00000000..3892d3f7
+--- /dev/null
++++ b/mods/builtin/packages/psx.enhancement.cpu-overclock/1.0.0/manifest.toml
+@@ -0,0 +1,36 @@
++format_version = 5
++id = "psx.enhancement.cpu-overclock"
++version = "1.0.0"
++name = "CPU Overclock"
++author = "psxrecomp"
++description = "Runs the emulated PS1 processor faster than stock, removing the slowdown original hardware shows in busy scenes."
++resolver = "declarative"
++save_compatibility = "shared"
++
++# CPU speed is a property of the emulated hardware, not of any particular
++# disc, so this ships with the framework and applies to every game.
++[[target]]
++game_id = "*"
++
++[[feature]]
++id = "cpu-overclock"
++name = "CPU Overclock"
++description = "Disabled by default. When a scene has more work than the original CPU can finish in one frame, the game drops frames and runs slow -- on real hardware too. This charges the emulated CPU less time for the same work, so the game finishes its frame in time while music, timers, CD and the refresh rate keep their real speed. It cannot raise a game above its own frame-rate cap (a 30 fps game stays 30). Code that waits by counting loops runs shorter, so if something plays too fast or misbehaves, lower the percent or turn this off."
++group = "Quality of Life"
++default_enabled = false
++
++[[option]]
++feature = "cpu-overclock"
++id = "percent"
++label = "CPU speed (percent of stock)"
++description = "100 is authentic. 150-200 clears most slowdown; higher only helps if a scene is still slow, and makes counted-loop timing bugs likelier. Range 100-1000."
++group = "Quality of Life"
++type = "integer"
++min = 100
++max = 1000
++step = 25
++default = 200
++
++[[plugin]]
++feature = "cpu-overclock"
++id = "psx.cpu-overclock"
+diff --git a/recompiler/src/config_loader.cpp b/recompiler/src/config_loader.cpp
+index 669e6d4e..0e7785f9 100644
+--- a/recompiler/src/config_loader.cpp
++++ b/recompiler/src/config_loader.cpp
+@@ -854,6 +854,57 @@ static std::string derive_out_stem(const std::string& rom_basename) {
+     return rom_basename;
+ }
+ 
++// [[recompiler.patch]] — exact-word instruction replacements, shared by game
++// configs and BIOS profiles (docs/config_schema.md).
++static std::vector<RecompilerPatch> parse_recompiler_patches(
++    const toml::value& recomp, const fs::path& config_path) {
++    std::vector<RecompilerPatch> recompiler_patches;
++    if (!recomp.contains("patch")) return recompiler_patches;
++    const auto& patches = toml::find<toml::array>(recomp, "patch");
++    std::set<std::string> seen_ids;
++    std::set<uint32_t> seen_addresses;
++    for (const auto& item : patches) {
++        RecompilerPatch patch;
++        patch.id = toml::find<std::string>(item, "id");
++        patch.address = parse_hex(toml::find<std::string>(item, "address"),
++                                  "recompiler.patch.address");
++        patch.expected = parse_hex(toml::find<std::string>(item, "expected"),
++                                   "recompiler.patch.expected");
++        patch.replacement = parse_hex(
++            toml::find<std::string>(item, "replacement"),
++            "recompiler.patch.replacement");
++        if (item.contains("note")) {
++            patch.note = toml::find<std::string>(item, "note");
++        }
++
++        if (patch.id.empty()) {
++            throw std::runtime_error(
++                "recompiler.patch.id must not be empty");
++        }
++        if ((patch.address & 3u) != 0u) {
++            throw std::runtime_error(fmt::format(
++                "{}: recompiler patch '{}' address 0x{:08X} is not "
++                "instruction-aligned",
++                config_path.string(), patch.id, patch.address));
++        }
++        if (!seen_ids.insert(patch.id).second) {
++            throw std::runtime_error(fmt::format(
++                "{}: duplicate [[recompiler.patch]] id '{}'",
++                config_path.string(), patch.id));
++        }
++        const uint32_t address_key =
++            recompiler_patch_address_key(patch.address);
++        if (!seen_addresses.insert(address_key).second) {
++            throw std::runtime_error(fmt::format(
++                "{}: duplicate [[recompiler.patch]] physical address "
++                "0x{:08X} (KUSEG/KSEG aliases are one site)",
++                config_path.string(), address_key));
++        }
++        recompiler_patches.push_back(std::move(patch));
++    }
++    return recompiler_patches;
++}
++
+ BiosConfig load_bios_config(const fs::path& config_path_in) {
+     const fs::path config_path = fs::absolute(config_path_in);
+     if (!fs::exists(config_path)) {
+@@ -1086,6 +1137,9 @@ BiosConfig load_bios_config(const fs::path& config_path_in) {
+                 "runtime_exports.deliver_event_ret");
+     }
+ 
++    std::vector<RecompilerPatch> recompiler_patches =
++        parse_recompiler_patches(recomp, config_path);
++
+     return BiosConfig{
+         /*config_path*/  config_path,
+         /*project_root*/ root,
+@@ -1107,6 +1161,7 @@ BiosConfig load_bios_config(const fs::path& config_path_in) {
+         /*install_slots*/  std::move(install_slots),
+         /*shell_entry_phys*/  shell_entry_phys,
+         /*deliver_event_ret*/ deliver_event_ret,
++        /*recompiler_patches*/ std::move(recompiler_patches),
+     };
+ }
+ 
+@@ -1373,51 +1428,8 @@ GameConfig load_game_config(const fs::path& config_path_in) {
+         out_stem = derive_out_stem(fs::path(exe_field).filename().string());
+     }
+ 
+-    std::vector<RecompilerPatch> recompiler_patches;
+-    if (recomp.contains("patch")) {
+-        const auto& patches = toml::find<toml::array>(recomp, "patch");
+-        std::set<std::string> seen_ids;
+-        std::set<uint32_t> seen_addresses;
+-        for (const auto& item : patches) {
+-            RecompilerPatch patch;
+-            patch.id = toml::find<std::string>(item, "id");
+-            patch.address = parse_hex(toml::find<std::string>(item, "address"),
+-                                      "recompiler.patch.address");
+-            patch.expected = parse_hex(toml::find<std::string>(item, "expected"),
+-                                       "recompiler.patch.expected");
+-            patch.replacement = parse_hex(
+-                toml::find<std::string>(item, "replacement"),
+-                "recompiler.patch.replacement");
+-            if (item.contains("note")) {
+-                patch.note = toml::find<std::string>(item, "note");
+-            }
+-
+-            if (patch.id.empty()) {
+-                throw std::runtime_error(
+-                    "recompiler.patch.id must not be empty");
+-            }
+-            if ((patch.address & 3u) != 0u) {
+-                throw std::runtime_error(fmt::format(
+-                    "{}: recompiler patch '{}' address 0x{:08X} is not "
+-                    "instruction-aligned",
+-                    config_path.string(), patch.id, patch.address));
+-            }
+-            if (!seen_ids.insert(patch.id).second) {
+-                throw std::runtime_error(fmt::format(
+-                    "{}: duplicate [[recompiler.patch]] id '{}'",
+-                    config_path.string(), patch.id));
+-            }
+-            const uint32_t address_key =
+-                recompiler_patch_address_key(patch.address);
+-            if (!seen_addresses.insert(address_key).second) {
+-                throw std::runtime_error(fmt::format(
+-                    "{}: duplicate [[recompiler.patch]] physical address "
+-                    "0x{:08X} (KUSEG/KSEG aliases are one site)",
+-                    config_path.string(), address_key));
+-            }
+-            recompiler_patches.push_back(std::move(patch));
+-        }
+-    }
++    std::vector<RecompilerPatch> recompiler_patches =
++        parse_recompiler_patches(recomp, config_path);
+ 
+     // Optional [widescreen] block — per-game hooks for the widescreen hack.
+     std::vector<uint32_t> ws_sprite_tag_funcs;
+diff --git a/recompiler/src/config_loader.h b/recompiler/src/config_loader.h
+index dc0c4e3e..909d1b4e 100644
+--- a/recompiler/src/config_loader.h
++++ b/recompiler/src/config_loader.h
+@@ -712,6 +712,12 @@ struct BiosConfig {
+     uint32_t shell_entry_phys  = 0;  // BIOS boot-skip trigger (bios_hle.c)
+     uint32_t deliver_event_ret = 0;  // $ra after the kernel DeliverEvent jalr
+ 
++    // [[recompiler.patch]]: exact-word replacements applied to the ROM image
++    // after the sha256 gate and before discovery/emission. For a replacement
++    // BIOS whose routine diverges from the documented retail behaviour the
++    // games depend on. The ROM file itself stays the pinned, hashed image.
++    std::vector<RecompilerPatch> recompiler_patches;
++
+     // NOTE: a BIOS profile has NO [runtime] block. It describes an IMAGE —
+     // facts about bytes — never a preference; runtime options belong to
+     // game.toml/settings.toml, where the player and the title can both be
+diff --git a/recompiler/src/full_function_emitter.cpp b/recompiler/src/full_function_emitter.cpp
+index c15f32d4..18ba3780 100644
+--- a/recompiler/src/full_function_emitter.cpp
++++ b/recompiler/src/full_function_emitter.cpp
+@@ -54,6 +54,13 @@ void FullFunctionEmitter::set_bios_profile(const BiosConfig* cfg) {
+     g_bios_profile = cfg;
+ }
+ 
++/* Unpatched image for the psx_bios_image identity fields; see the header. */
++static const std::vector<uint8_t>* g_identity_image = nullptr;
++
++void FullFunctionEmitter::set_identity_image(const std::vector<uint8_t>* image) {
++    g_identity_image = image;
++}
++
+ /* Symbol namespace for this BIOS image, derived from the profile's out_stem
+  * (e.g. "OpenBIOS_"). Every symbol this emitter DEFINES is prefixed with it so
+  * two recompiled BIOSes can be linked into one binary and chosen at runtime.
+@@ -1917,16 +1924,17 @@ void FullFunctionEmitter::emit_dispatch(
+     // emitted next to the code they describe, so they cannot disagree with
+     // the linked BIOS. Layout must match PsxBiosImageInfo in the header.
+     {
++        const std::vector<uint8_t>& image = g_identity_image ? *g_identity_image : rom;
+         uint32_t crc = 0xFFFFFFFFu;               /* IEEE CRC-32 (zlib) */
+-        for (uint8_t b : rom) {
++        for (uint8_t b : image) {
+             crc ^= b;
+             for (int k = 0; k < 8; ++k)
+                 crc = (crc >> 1) ^ (0xEDB88320u & (0u - (crc & 1u)));
+         }
+         crc = ~crc;
+         uint32_t wsum = 0;                        /* memory.c savestate checksum */
+-        for (size_t i = 0; i + 3 < rom.size(); i += 4)
+-            wsum += read_u32_le(rom, static_cast<uint32_t>(i));
++        for (size_t i = 0; i + 3 < image.size(); i += 4)
++            wsum += read_u32_le(image, static_cast<uint32_t>(i));
+ 
+         const std::string id  = g_bios_profile ? g_bios_profile->id : "";
+         const uint32_t    sep = g_bios_profile ? g_bios_profile->shell_entry_phys : 0u;
+diff --git a/recompiler/src/full_function_emitter.h b/recompiler/src/full_function_emitter.h
+index e2919342..ddf18071 100644
+--- a/recompiler/src/full_function_emitter.h
++++ b/recompiler/src/full_function_emitter.h
+@@ -65,6 +65,12 @@ public:
+     // zero anchors (every profile-keyed HLE feature structurally off).
+     static void set_bios_profile(const BiosConfig* cfg);
+ 
++    // The image as shipped, when the rom passed to emit() carries profile
++    // [[recompiler.patch]] edits. The runtime identifies the BIOS file it loads
++    // by size/crc32/wordsum, so those must describe the unpatched bytes while
++    // the code is emitted from the patched ones. Null = rom is the shipped image.
++    static void set_identity_image(const std::vector<uint8_t>* image);
++
+     // Emit <out_stem>_full.c and <out_stem>_dispatch.c into out_dir.
+     // rom: flat BIOS image bytes
+     // base_addr: virtual address of rom[0] (0xBFC00000)
+diff --git a/recompiler/src/main_bios.cpp b/recompiler/src/main_bios.cpp
+index a45c9e9f..fd482437 100644
+--- a/recompiler/src/main_bios.cpp
++++ b/recompiler/src/main_bios.cpp
+@@ -770,7 +770,8 @@ int run_emit_full(const fs::path& bios_path, const fs::path& out_dir,
+                   const PSXRecompV4::BiosAddressModel& model,
+                   const std::string& declared_sha = {},
+                   const std::vector<PSXRecompV4::BiosVectorTable>& bios_vectors = {},
+-                  const std::vector<PSXRecompV4::BiosAlias>& bios_aliases = {}) {
++                  const std::vector<PSXRecompV4::BiosAlias>& bios_aliases = {},
++                  const std::vector<PSXRecompV4::RecompilerPatch>& patches = {}) {
+     // Setup zips omit generated/; ensure the out_dir exists before emit.
+     fs::create_directories(out_dir);
+ 
+@@ -780,7 +781,7 @@ int run_emit_full(const fs::path& bios_path, const fs::path& out_dir,
+     PSXRecompV4::FunctionDiscovery::set_address_model(&model);
+ 
+     // 1. Load + validate BIOS file.
+-    const auto rom = load_file_strict(bios_path, kBiosSize);
++    auto rom = load_file_strict(bios_path, kBiosSize);
+     const std::string sha = sha256_hex(rom);
+ 
+     // Declared-identity gate: a profile that pins [program.image] sha256
+@@ -795,6 +796,22 @@ int run_emit_full(const fs::path& bios_path, const fs::path& out_dir,
+         return 1;
+     }
+ 
++    // Profile instruction patches: applied after the identity gate (the sha
++    // names the pinned upstream image) and before discovery, so control flow
++    // and emitted code both see the patched words.
++    // The runtime still loads the unpatched file and identifies it by crc32,
++    // so the emitter describes the shipped image, not the patched one.
++    const std::vector<uint8_t> shipped_rom = rom;
++    PSXRecompV4::FullFunctionEmitter::set_identity_image(&shipped_rom);
++    if (!patches.empty()) {
++        PSXRecompV4::apply_recompiler_patches_to_image(rom, kBiosBase, patches);
++        for (const auto& p : patches) {
++            std::fprintf(stdout,
++                "psxrecomp-bios: patch %s @ 0x%08X: 0x%08X -> 0x%08X\n",
++                p.id.c_str(), p.address, p.expected, p.replacement);
++        }
++    }
++
+     // 2. Load seeds.
+     auto seeds = load_seeds(seed_path);
+     const size_t vector_seed_count =
+@@ -993,7 +1010,8 @@ int main(int argc, char** argv) {
+             PSXRecompV4::FullFunctionEmitter::set_bios_profile(&cfg);
+             return run_emit_full(cfg.rom_path, cfg.out_dir, cfg.seeds_path,
+                                  cfg.out_stem, model, cfg.image_sha256,
+-                                 cfg.bios_vectors, cfg.bios_aliases);
++                                 cfg.bios_vectors, cfg.bios_aliases,
++                                 cfg.recompiler_patches);
+         }
+ 
+         // ── Positional form (legacy) ───────────────────────────────────
+diff --git a/recompiler/src/recompiler_patch.cpp b/recompiler/src/recompiler_patch.cpp
+index 31b15bb9..42eb14b2 100644
+--- a/recompiler/src/recompiler_patch.cpp
++++ b/recompiler/src/recompiler_patch.cpp
+@@ -67,6 +67,37 @@ void apply_recompiler_patches_to_executable(
+     }
+ }
+ 
++void apply_recompiler_patches_to_image(std::vector<uint8_t>& image,
++                                       uint32_t base_address,
++                                       const std::vector<RecompilerPatch>& patches) {
++    const uint32_t base_key = recompiler_patch_address_key(base_address);
++    const uint64_t image_end = static_cast<uint64_t>(base_key) + image.size();
++
++    for (const auto& patch : patches) {
++        const uint32_t patch_key = recompiler_patch_address_key(patch.address);
++        if (patch_key < base_key || static_cast<uint64_t>(patch_key) + 4u > image_end) {
++            throw std::runtime_error(fmt::format(
++                "recompiler patch '{}' address 0x{:08X} is outside the image "
++                "at 0x{:08X} (+0x{:X})",
++                patch.id, patch.address, base_address, image.size()));
++        }
++
++        const size_t offset = static_cast<size_t>(patch_key - base_key);
++        const uint32_t observed =
++            static_cast<uint32_t>(image[offset]) |
++            (static_cast<uint32_t>(image[offset + 1]) << 8) |
++            (static_cast<uint32_t>(image[offset + 2]) << 16) |
++            (static_cast<uint32_t>(image[offset + 3]) << 24);
++        const uint32_t resolved = apply_one_recompiler_patch(
++            patch, patch.address, observed, /*overlay_mode=*/false);
++
++        image[offset] = static_cast<uint8_t>(resolved);
++        image[offset + 1] = static_cast<uint8_t>(resolved >> 8);
++        image[offset + 2] = static_cast<uint8_t>(resolved >> 16);
++        image[offset + 3] = static_cast<uint8_t>(resolved >> 24);
++    }
++}
++
+ void merge_recompiler_patches(std::vector<RecompilerPatch>& destination,
+                               const std::vector<RecompilerPatch>& incoming) {
+     for (const auto& candidate : incoming) {
+diff --git a/recompiler/src/recompiler_patch.h b/recompiler/src/recompiler_patch.h
+index 472af983..10fda0c1 100644
+--- a/recompiler/src/recompiler_patch.h
++++ b/recompiler/src/recompiler_patch.h
+@@ -40,6 +40,13 @@ void apply_recompiler_patches_to_executable(
+     const std::vector<RecompilerPatch>& patches,
+     bool overlay_mode);
+ 
++// Apply every patch to a flat image loaded at base_address (a BIOS ROM). Unlike
++// a captured overlay there is only one image, so a patch outside it or a guard
++// mismatch is a stale profile and throws.
++void apply_recompiler_patches_to_image(std::vector<uint8_t>& image,
++                                       uint32_t base_address,
++                                       const std::vector<RecompilerPatch>& patches);
++
+ // Merge patches received through --config and --ws-config. Byte-identical
+ // repeats are deduplicated; conflicting IDs or aliased addresses throw.
+ void merge_recompiler_patches(std::vector<RecompilerPatch>& destination,
 diff --git a/runtime/include/cdrom.h b/runtime/include/cdrom.h
 index df5cb346..2504f8ed 100644
 --- a/runtime/include/cdrom.h
@@ -86,6 +578,90 @@ index ace31f11..16cde508 100644
  } GpuRenderBackend;
  
  #ifdef __cplusplus
+diff --git a/runtime/include/mod_plugins.h b/runtime/include/mod_plugins.h
+index a1e4645e..0a4c254d 100644
+--- a/runtime/include/mod_plugins.h
++++ b/runtime/include/mod_plugins.h
+@@ -195,6 +195,17 @@ int psx_mod_set_load_acceleration(uint32_t wall_clock_multiplier,
+ int psx_mod_set_disc_speed(uint32_t divisor,
+                            uint32_t instant_max_per_frame);
+ 
++/*
++ * Emulated CPU speed as a percent of stock, PSX_MOD_CPU_OVERCLOCK_MIN..MAX
++ * (100 = authentic). Scales only the CPU's own cycle costs, so a game that
++ * slows down because its frame work overruns a VBlank finishes in time while
++ * timers, audio, CD and the refresh rate keep their real rates. Guest-visible:
++ * code that busy-waits a counted loop runs shorter, so it is opt-in.
++ */
++#define PSX_MOD_CPU_OVERCLOCK_MIN  100u
++#define PSX_MOD_CPU_OVERCLOCK_MAX 1000u
++int psx_mod_set_cpu_overclock(uint32_t percent);
++
+ /* Controller presentation values exposed to trusted game-owned plugins. */
+ enum {
+     PSX_MOD_CONTROLLER_ANALOG = 1,
+diff --git a/runtime/include/psx_cyc.h b/runtime/include/psx_cyc.h
+index 4239c123..48c183fd 100644
+--- a/runtime/include/psx_cyc.h
++++ b/runtime/include/psx_cyc.h
+@@ -92,8 +92,10 @@ static inline void psx_cyc_local_cleanup(uint32_t **guard) {
+ static inline void psx_cyc_charge(uint32_t cycles) {
+     if (cycles == 0u) return;
+ #if defined(PSX_OVERLAY_DLL_BUILD)
+-    psx_advance_cycles(cycles);
++    psx_advance_cycles(cycles);   /* host scales at the advance_cycles callback */
+ #else
++    cycles = psx_oc_scale(cycles);   /* CPU overclock; identity at stock */
++    if (cycles == 0u) return;
+ #if defined(__GNUC__) || defined(__clang__)
+     if (__builtin_expect(g_ls_replay_active | g_event_step_conservative, 0)) {
+ #else
+diff --git a/runtime/include/psx_cycles.h b/runtime/include/psx_cycles.h
+index 25ba1f3b..3de59220 100644
+--- a/runtime/include/psx_cycles.h
++++ b/runtime/include/psx_cycles.h
+@@ -66,6 +66,41 @@ extern int g_psx_cyc_bb_defer;
+  * via psx_cyc_local_publish / psx_cyc_batch_flush before IRQ/MMIO barriers. */
+ extern uint32_t *g_psx_cyc_local_acc;
+ 
++/* CPU overclock (enhancement, off = stock). The guest CPU runs as native code,
++ * so a faster CPU cannot mean executing quicker -- it means CHARGING LESS guest
++ * time for the same work. Every device schedules off psx_cycle_count and VBlank
++ * fires on a fixed cycle period, so scaling the CPU's own costs down lets the
++ * game finish more work per frame while timers, SPU, CD, DMA and the refresh
++ * rate keep their real rates.
++ *
++ * Only CPU-work producers scale (instruction base, data loads, I-cache refills,
++ * mult/div and GTE latencies); they call psx_oc_scale() before charging.
++ * psx_advance_cycles() itself stays unscaled, because its other callers advance
++ * to an absolute guest time (idle skip, stall-to-deadline, load acceleration)
++ * and must land exactly on it.
++ *
++ * Q16 fixed point with a carried remainder: a 1-cycle charge at 2x is 0.5, so
++ * a plain divide would floor to zero and lose all time. 65536 == stock, which
++ * short-circuits to one predictable compare on this hot path. */
++void     psx_set_cpu_overclock(uint32_t percent);   /* 100 = stock */
++uint32_t psx_get_cpu_overclock(void);
++/* Scaled advance for CPU work; the overlay-DLL advance_cycles callback, whose
++ * pending total is only ever CPU charges. */
++void     psx_advance_cpu_cycles(uint32_t cycles);
++
++#if !defined(PSX_OVERLAY_DLL_BUILD)
++extern uint32_t g_psx_oc_scale_q16;
++extern uint32_t g_psx_oc_accum;
++
++static inline uint32_t psx_oc_scale(uint32_t cycles) {
++    if (g_psx_oc_scale_q16 == 65536u) return cycles;   /* stock: exact */
++    uint64_t t = (uint64_t)cycles * (uint64_t)g_psx_oc_scale_q16
++               + (uint64_t)g_psx_oc_accum;
++    g_psx_oc_accum = (uint32_t)(t & 0xFFFFu);
++    return (uint32_t)(t >> 16);
++}
++#endif
++
+ /* Advance guest time. Overlay DLLs forward this through their callback shim;
+  * normal runtime/generated code keeps the common production path inlined. */
+ #if defined(PSX_OVERLAY_DLL_BUILD)
 diff --git a/runtime/include/sio.h b/runtime/include/sio.h
 index b943aab6..2d423278 100644
 --- a/runtime/include/sio.h
@@ -116,6 +692,55 @@ index 31bf7b96..2f3fd9af 100644
  
  /* ---- Per-voice register snapshot. Mirrors the fields the Beetle oracle
   * exposes via PS_SPU::GetRegister(GSREG_V0_*) so both backends produce a
+diff --git a/runtime/src/bios_hle.c b/runtime/src/bios_hle.c
+index 11a875f4..53d1a1ce 100644
+--- a/runtime/src/bios_hle.c
++++ b/runtime/src/bios_hle.c
+@@ -181,7 +181,7 @@ static void hle_open_event(CPUState* cpu, uint32_t base, uint32_t n)
+         cpu->write_word(ev + EV_STATUS, EVST_DISABLED);
+         cpu->gpr[2] = 0xF1000000u | slot;
+     }
+-    psx_advance_cycles(40u + 6u * (slot == 0xFFFFFFFFu ? n : slot + 1u));
++    psx_advance_cpu_cycles(40u + 6u * (slot == 0xFFFFFFFFu ? n : slot + 1u));
+ }
+ 
+ /* CloseEvent (kernel 0x1E1C): status=free, return 1. */
+@@ -190,7 +190,7 @@ static void hle_close_event(CPUState* cpu, uint32_t base)
+     uint32_t ev = base + (cpu->gpr[4] & 0xFFFFu) * EVCB_STRIDE;
+     cpu->write_word(ev + EV_STATUS, EVST_FREE);
+     cpu->gpr[2] = 1u;
+-    psx_advance_cycles(36u);
++    psx_advance_cpu_cycles(36u);
+ }
+ 
+ /* TestEvent (kernel 0x1EC8): ready => re-arm to enabled and return 1, else 0. */
+@@ -203,7 +203,7 @@ static void hle_test_event(CPUState* cpu, uint32_t base)
+     } else {
+         cpu->gpr[2] = 0u;
+     }
+-    psx_advance_cycles(40u);
++    psx_advance_cpu_cycles(40u);
+ }
+ 
+ /* EnableEvent (kernel 0x1F10) / DisableEvent (kernel 0x1F4C): a non-free
+@@ -215,7 +215,7 @@ static void hle_set_event_status(CPUState* cpu, uint32_t base, uint32_t status)
+     if (cpu->read_word(ev + EV_STATUS) != EVST_FREE)
+         cpu->write_word(ev + EV_STATUS, status);
+     cpu->gpr[2] = 1u;
+-    psx_advance_cycles(40u);
++    psx_advance_cpu_cycles(40u);
+ }
+ 
+ /* DeliverEvent (kernel 0x1B44): for every ENABLED EvCB matching class+spec,
+@@ -259,7 +259,7 @@ static void hle_deliver_event(CPUState* cpu, uint32_t base, uint32_t n)
+      * caller may depend on it (libapi types DeliverEvent void). Set 0 for a
+      * stable, observable value. */
+     cpu->gpr[2] = 0u;
+-    psx_advance_cycles(36u + 12u * n);
++    psx_advance_cpu_cycles(36u + 12u * n);
+ }
+ 
+ /* B0 vector service. Returns 1 iff serviced in HLE. */
 diff --git a/runtime/src/cdrom.c b/runtime/src/cdrom.c
 index 73884657..ba917aa8 100644
 --- a/runtime/src/cdrom.c
@@ -145,6 +770,19 @@ index 73884657..ba917aa8 100644
  int cdrom_data_read_active(void) {
      return reading && !xa_stream_active;
  }
+diff --git a/runtime/src/data_shards.c b/runtime/src/data_shards.c
+index 6c3be641..7262e6b3 100644
+--- a/runtime/src/data_shards.c
++++ b/runtime/src/data_shards.c
+@@ -421,7 +421,7 @@ static void ds_apply(CPUState* cpu, DsShard* s) {
+     uint64_t remaining = s->cyc_cost;
+     while (remaining) {
+         uint32_t chunk = remaining > 2048u ? 2048u : (uint32_t)remaining;
+-        psx_advance_cycles(chunk);
++        psx_advance_cpu_cycles(chunk);   /* recorded CPU work: overclock applies */
+         remaining -= chunk;
+         psx_check_interrupts_at(cpu, ra);
+     }
 diff --git a/runtime/src/debug_server.c b/runtime/src/debug_server.c
 index 77b67764..ad80271a 100644
 --- a/runtime/src/debug_server.c
@@ -283,6 +921,26 @@ index 77b67764..ad80271a 100644
      { "gpu_frame_dump",    handle_gpu_frame_dump },
      { "a0_history",        handle_a0_history },
      { "c0_history",        handle_c0_history },
+diff --git a/runtime/src/dirty_ram_interp.c b/runtime/src/dirty_ram_interp.c
+index 3da7fd6f..082c7ae9 100644
+--- a/runtime/src/dirty_ram_interp.c
++++ b/runtime/src/dirty_ram_interp.c
+@@ -97,12 +97,13 @@ static inline void interp_cyc_step(CPUState *cpu, uint32_t reg_mask) {
+     if (cpu->read_absorb[w]) {
+         cpu->read_absorb[w]--;
+     } else if (!g_ls_replay_active) {
+-        uint64_t next = psx_cycle_count + 1u;
++        uint32_t c = psx_oc_scale(1u);   /* CPU overclock; identity at stock */
++        uint64_t next = psx_cycle_count + c;
+         if (!g_event_step_conservative && g_psx_cycle_fast_limit != 0u &&
+             next <= g_psx_cycle_fast_limit) {
+             psx_cycle_count = next;
+         } else {
+-            psx_advance_cycles(1u);
++            psx_advance_cycles(c);
+         }
+     }
+     psx_cyc_deps(cpu, reg_mask);
 diff --git a/runtime/src/gpu.c b/runtime/src/gpu.c
 index 8d91f79a..dcff801f 100644
 --- a/runtime/src/gpu.c
@@ -694,7 +1352,7 @@ index 848309e2..7eb04344 100644
      return 0;
  }
 diff --git a/runtime/src/main.cpp b/runtime/src/main.cpp
-index 022b1baa..343e9730 100644
+index 022b1baa..af3d8fc5 100644
 --- a/runtime/src/main.cpp
 +++ b/runtime/src/main.cpp
 @@ -1,4 +1,4 @@
@@ -703,7 +1361,27 @@ index 022b1baa..343e9730 100644
   *
   * Loads BIOS ROM, initializes CPU state + SDL display, calls into
   * the recompiled reset vector. BIOS drives execution; SDL presents
-@@ -1621,6 +1621,17 @@ static void clamp_window_aspect(int* w, int* h, int num, int den) {
+@@ -1536,6 +1536,19 @@ extern "C" int psx_mod_set_disc_speed(
+     return 1;
+ }
+ 
++extern "C" int psx_mod_set_cpu_overclock(uint32_t percent) {
++    if (percent < PSX_MOD_CPU_OVERCLOCK_MIN ||
++        percent > PSX_MOD_CPU_OVERCLOCK_MAX) {
++        std::fprintf(stderr,
++            "psxrecomp: mod rejected CPU overclock %u%%\n", (unsigned)percent);
++        return 0;
++    }
++    psx_set_cpu_overclock(percent);
++    std::fprintf(stdout, "psxrecomp: mod selected CPU overclock %u%%\n",
++                 (unsigned)psx_get_cpu_overclock());
++    return 1;
++}
++
+ extern "C" int psx_mod_set_controller_mode_override(
+     uint32_t player, uint32_t controller_mode) {
+     if (player >= PSX_MAX_PLAYERS ||
+@@ -1621,6 +1634,17 @@ static void clamp_window_aspect(int* w, int* h, int num, int den) {
      *h = width * den / num;
  }
  
@@ -721,7 +1399,7 @@ index 022b1baa..343e9730 100644
  static int aspect_gcd(int a, int b) {
      while (b) { int t = a % b; a = b; b = t; }
      return a > 0 ? a : 1;
-@@ -2048,6 +2059,13 @@ uint64_t g_turbo_loads_frames  = 0;   /* vblanks run unpaced (observability) */
+@@ -2048,6 +2072,13 @@ uint64_t g_turbo_loads_frames  = 0;   /* vblanks run unpaced (observability) */
  int      g_turbo_audio_sink_enabled = 0;
  int      g_turbo_audio_sink_active = 0;
  uint64_t g_turbo_audio_sink_frames = 0; /* guest SPU frames advanced, not queued */
@@ -735,7 +1413,7 @@ index 022b1baa..343e9730 100644
  }
  static int g_turbo_audio_sink_config_enabled = 0;
  /* The CD predicate already excludes XA and holds across ordinary inter-file
-@@ -2058,6 +2076,24 @@ static int g_turbo_audio_sink_config_enabled = 0;
+@@ -2058,6 +2089,24 @@ static int g_turbo_audio_sink_config_enabled = 0;
   * advancing normally. */
  #define TURBO_LOADS_ENGAGE_FRAMES  4
  #define TURBO_LOADS_RELEASE_FRAMES 6
@@ -760,7 +1438,7 @@ index 022b1baa..343e9730 100644
  /* Zero multiplier retains the historical uncapped turbo behavior. */
  static int g_turbo_load_wall_multiplier = 0;
  static int g_turbo_load_release_frames = TURBO_LOADS_RELEASE_FRAMES;
-@@ -6562,6 +6598,12 @@ static NetplayVblankEpilogue sdl_vblank_present_body(void) {
+@@ -6562,6 +6611,12 @@ static NetplayVblankEpilogue sdl_vblank_present_body(void) {
                  psx_crash_trace_set_exit_origin("sdl_window_close");
                  shutdown_runtime();
                  std::exit(0);
@@ -773,7 +1451,7 @@ index 022b1baa..343e9730 100644
              } else if (ev.type == SDL_CONTROLLERDEVICEADDED) {
                  refresh_player_devices();
              } else if (ev.type == SDL_CONTROLLERDEVICEREMOVED) {
-@@ -6653,6 +6695,20 @@ static NetplayVblankEpilogue sdl_vblank_present_body(void) {
+@@ -6653,6 +6708,20 @@ static NetplayVblankEpilogue sdl_vblank_present_body(void) {
                                     SDL_WINDOW_FULLSCREEN;
                      if (is_fs) {
                          SDL_SetWindowFullscreen(sdl_window, 0);
@@ -794,7 +1472,7 @@ index 022b1baa..343e9730 100644
                          host_osd_push("Windowed", 1500);
                      } else {
                          /* If the configured mode is "off", the hotkey still
-@@ -6739,8 +6795,30 @@ static NetplayVblankEpilogue sdl_vblank_present_body(void) {
+@@ -6739,8 +6808,30 @@ static NetplayVblankEpilogue sdl_vblank_present_body(void) {
  
      /* Turbo-active test shared by the pacing/present gate below. */
      int turbo_loads_active = 0;
@@ -827,7 +1505,7 @@ index 022b1baa..343e9730 100644
      int load_run_value = 0;
      static int load_run = 0;
      static int release_run = 0;
-@@ -6768,6 +6846,44 @@ static NetplayVblankEpilogue sdl_vblank_present_body(void) {
+@@ -6768,6 +6859,44 @@ static NetplayVblankEpilogue sdl_vblank_present_body(void) {
          load_run = 0;
          release_run = 0;
      }
@@ -872,7 +1550,7 @@ index 022b1baa..343e9730 100644
      /* HLE boot-skip window: from reset until the game entry PC first
       * dispatches, run unpaced so the (shell-skipped) BIOS kernel init +
       * SYSTEM.CNF + game EXE load compress to host speed. This replaces the
-@@ -13138,8 +13254,11 @@ int main(int argc, char** argv) {
+@@ -13138,8 +13267,11 @@ int main(int argc, char** argv) {
          /* Fast Loading advances the guest at a host rate greater than real
           * time. Keep the canonical SPU/CD stream running, but discard the
           * accelerated presentation-side audio until pacing resumes; otherwise
@@ -886,7 +1564,7 @@ index 022b1baa..343e9730 100644
          if (g_turbo_load_wall_multiplier) {
              std::fprintf(stdout,
                  "psxrecomp: mod selected %dx load acceleration "
-@@ -13356,9 +13475,16 @@ session_reboot:
+@@ -13356,9 +13488,16 @@ session_reboot:
          g_video_perspective_texturing = (*e && *e != '0') ? 1 : 0;
      if (const char* e = std::getenv("PSX_PGXP_CPU_MODE"))
          g_video_pgxp_cpu_mode = (*e && *e != '0') ? 1 : 0;
@@ -906,6 +1584,152 @@ index 022b1baa..343e9730 100644
      pgxp_set_tolerance(g_video_pgxp_tolerance);
      /* Scanlines: env override wins over config, same as the corrections above,
       * so a headless/free-run boot can be captured with the effect armed from the
+diff --git a/runtime/src/memory.c b/runtime/src/memory.c
+index 75f08675..e9de8a01 100644
+--- a/runtime/src/memory.c
++++ b/runtime/src/memory.c
+@@ -1999,7 +1999,7 @@ static inline void psx_cyc_readmem(CPUState* cpu, uint32_t phys, uint32_t size,
+     uint32_t cost = region + compl_cost;               /* LDAbsorb = region + completion */
+     uint32_t fudge = (uint32_t)((cpu->read_fudge >> 4) & 2u);
+     cpu->ld_absorb = cost;
+-    psx_advance_cycles(fudge + cost);
++    psx_advance_cpu_cycles(fudge + cost);
+     cpu->ld_which_t = (uint8_t)arm_rt;
+     /* PROOF GATE (PSX_POLL_PROOF=N, default 0/off): a FLAT, non-absorbed extra N
+      * cycles per main-RAM data read — replicates the historical "+6 cyc/main-RAM
+diff --git a/runtime/src/mod_builtin_speed.c b/runtime/src/mod_builtin_speed.c
+index c48dceea..b04d90af 100644
+--- a/runtime/src/mod_builtin_speed.c
++++ b/runtime/src/mod_builtin_speed.c
+@@ -2,8 +2,9 @@
+  * Framework-owned loading-speed mods, available to every game.
+  *
+  * Loading acceleration is a property of the emulated hardware, not of any
+- * particular disc, so these two live here instead of being copied into each
+- * title's mods/ tree. The manifests in mods/builtin/packages target game_id
++ * particular disc, so these live here instead of being copied into each
++ * title's mods/ tree. CPU overclock joins them for the same reason: it is the
++ * emulated processor's speed, the cure for in-game slowdown on any title. The manifests in mods/builtin/packages target game_id
+  * "*", and runtime.cmake stages them beside every game's own catalog.
+  *
+  * The two are deliberately independent: host pacing is safe but speeds the
+@@ -19,6 +20,7 @@
+ 
+ #define PKG_FAST "psx.enhancement.fast-loading"
+ #define PKG_CD   "psx.enhancement.cd-speed"
++#define PKG_OC   "psx.enhancement.cpu-overclock"
+ 
+ static long speed_option_number(const char* pkg, const char* feature,
+                                 const char* id, long fallback) {
+@@ -63,9 +65,16 @@ static void builtin_cd_speed_activate(void) {
+         (unsigned)speed_option_number(PKG_CD, "cd-speed", "multiplier", 4), 0u);
+ }
+ 
++static void builtin_cpu_overclock_activate(void) {
++    (void)psx_mod_set_cpu_overclock((unsigned)speed_option_number(
++        PKG_OC, "cpu-overclock", "percent", 200));
++}
++
+ PSX_MOD_CONSTRUCTOR(psx_register_builtin_speed_plugins) {
+     (void)psx_mod_register_activation_plugin(
+         "psx.fast-loading", builtin_fast_loading_activate);
+     (void)psx_mod_register_activation_plugin(
+         "psx.cd-speed", builtin_cd_speed_activate);
++    (void)psx_mod_register_activation_plugin(
++        "psx.cpu-overclock", builtin_cpu_overclock_activate);
+ }
+diff --git a/runtime/src/overlay_loader.c b/runtime/src/overlay_loader.c
+index a2b32480..f654ec9e 100644
+--- a/runtime/src/overlay_loader.c
++++ b/runtime/src/overlay_loader.c
+@@ -2244,8 +2244,9 @@ static void init_callbacks(void) {
+     s_callbacks.dispatch_call        = overlay_dispatch_call_probed;
+     s_callbacks.check_interrupts     = overlay_ci_wrapper;
+     s_callbacks.check_interrupts_at  = overlay_ci_at_wrapper;
+-    /* Address of the header inline → out-of-line copy in this TU (host side). */
+-    s_callbacks.advance_cycles     = psx_advance_cycles;
++    /* A DLL's pending total is only CPU-work charges (its stalls and loads call
++     * back into host helpers), so the scaled advance applies the overclock. */
++    s_callbacks.advance_cycles     = psx_advance_cpu_cycles;
+     s_callbacks.gte_execute          = gte_execute;
+     s_callbacks.psx_syscall          = psx_syscall;
+     s_callbacks.psx_native_bad_entry = psx_native_bad_entry;
+diff --git a/runtime/src/psx_cycles.c b/runtime/src/psx_cycles.c
+index 1057093f..d9302138 100644
+--- a/runtime/src/psx_cycles.c
++++ b/runtime/src/psx_cycles.c
+@@ -25,6 +25,31 @@ uint32_t g_psx_cyc_batch = 0;
+ uint32_t g_psx_cyc_batch_limit = 0;
+ int      g_psx_cyc_bb_defer = 0;
+ uint32_t *g_psx_cyc_local_acc = NULL;
++
++/* CPU overclock state; the model is documented at psx_oc_scale in the header. */
++uint32_t g_psx_oc_scale_q16 = 65536u;   /* 1.0 = stock */
++uint32_t g_psx_oc_accum     = 0u;
++
++/* percent: 100 = stock. Floor 100: underclocking would starve the game of time
++ * it assumes it has. Ceiling 1000: beyond that most instructions charge 0 for
++ * long runs, and upstream measured a boot that never enables the display at
++ * 10x, so higher is not a useful promise. */
++void psx_set_cpu_overclock(uint32_t percent) {
++    if (percent < 100u)  percent = 100u;
++    if (percent > 1000u) percent = 1000u;
++    g_psx_oc_scale_q16 = (uint32_t)((65536ull * 100ull) / (uint64_t)percent);
++    g_psx_oc_accum = 0u;
++}
++
++uint32_t psx_get_cpu_overclock(void) {
++    return (uint32_t)((65536ull * 100ull + g_psx_oc_scale_q16 / 2u) /
++                      (uint64_t)g_psx_oc_scale_q16);
++}
++
++void psx_advance_cpu_cycles(uint32_t cycles) {
++    psx_advance_cycles(psx_oc_scale(cycles));
++}
++
+ static int      s_cycle_replay_active = 0;
+ static uint64_t s_cycle_replay_live = 0;
+ 
+@@ -674,7 +699,7 @@ uint32_t psx_mult_latency_u(uint32_t rs) {  /* MULTU (unsigned) */
+ /* DIV/DIVU latency is the fixed constant 37 — emitted directly at the op site. */
+ 
+ void psx_muldiv_set(CPUState* cpu, uint32_t latency) {
+-    cpu->muldiv_ts_done = psx_cycle_count + (uint64_t)latency;
++    cpu->muldiv_ts_done = psx_cycle_count + (uint64_t)psx_oc_scale(latency);
+ }
+ 
+ void psx_muldiv_stall(CPUState* cpu) {
+@@ -764,7 +789,7 @@ void psx_gte_set(CPUState* cpu, uint32_t latency) {
+     if (cpu->gte_ts_done > psx_cycle_count) {
+         psx_advance_cycles((uint32_t)(cpu->gte_ts_done - psx_cycle_count));
+     }
+-    cpu->gte_ts_done = psx_cycle_count + (uint64_t)latency;
++    cpu->gte_ts_done = psx_cycle_count + (uint64_t)psx_oc_scale(latency);
+ }
+ 
+ void psx_gte_stall(CPUState* cpu) {
+diff --git a/runtime/src/psx_icache.c b/runtime/src/psx_icache.c
+index 5ba898a3..ec8e2fd3 100644
+--- a/runtime/src/psx_icache.c
++++ b/runtime/src/psx_icache.c
+@@ -84,7 +84,7 @@ void psx_icache_fetch_miss(CPUState* cpu, uint32_t addr) {
+     cpu->read_absorb_which = 0u;
+ 
+     if (addr >= 0xA0000000u) { /* KSEG1 / uncached (BIOS ROM) */
+-        psx_advance_cycles(4u);
++        psx_advance_cpu_cycles(4u);
+         return;
+     }
+ 
+@@ -100,7 +100,7 @@ void psx_icache_fetch_miss(CPUState* cpu, uint32_t addr) {
+         g_psx_icache_tv[bidx + i] &= ~0x2u;
+         cost++;
+     }
+-    psx_advance_cycles(cost);
++    psx_advance_cpu_cycles(cost);
+ #else
+     (void)cpu;
+     (void)addr;
 diff --git a/runtime/src/sio.c b/runtime/src/sio.c
 index 08dcadd0..4155c275 100644
 --- a/runtime/src/sio.c

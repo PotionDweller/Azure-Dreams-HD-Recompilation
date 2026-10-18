@@ -1,0 +1,39 @@
+# Azure Dreams override of the framework builtin (same id + version, staged
+# after it, so this copy wins -- see psxrecomp docs/MOD_PACKAGES.md). Only
+# the defaults differ: on, 150%. Keep the rest in sync with the builtin.
+format_version = 5
+id = "psx.enhancement.cpu-overclock"
+version = "1.0.0"
+name = "CPU Overclock"
+author = "psxrecomp"
+description = "Runs the emulated PS1 processor faster than stock, removing the slowdown original hardware shows in busy scenes."
+resolver = "declarative"
+save_compatibility = "shared"
+
+# CPU speed is a property of the emulated hardware, not of any particular
+# disc, so this ships with the framework and applies to every game.
+[[target]]
+game_id = "*"
+
+[[feature]]
+id = "cpu-overclock"
+name = "CPU Overclock"
+description = "Enabled (150%) by default for Azure Dreams: the tower's foliage-and-water floors drop to ~24 fps on original hardware; this holds them at the game's steady 30. When a scene has more work than the original CPU can finish in one frame, the game drops frames and runs slow. This charges the emulated CPU less time for the same work, so music, timers, CD and the refresh rate keep their real speed. It cannot raise the game above its own 30 fps cap. Code that waits by counting loops runs shorter, so if something plays too fast or misbehaves, lower the percent or turn this off. (Menu cursors are loop-timed: at 200% they feel slippery; 150% keeps that mild.)"
+group = "Quality of Life"
+default_enabled = true
+
+[[option]]
+feature = "cpu-overclock"
+id = "percent"
+label = "CPU speed (percent of stock)"
+description = "100 is authentic. 150-200 clears most slowdown; higher only helps if a scene is still slow, and makes counted-loop timing bugs likelier. Range 100-1000."
+group = "Quality of Life"
+type = "integer"
+min = 100
+max = 1000
+step = 25
+default = 150
+
+[[plugin]]
+feature = "cpu-overclock"
+id = "psx.cpu-overclock"
