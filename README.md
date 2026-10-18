@@ -70,6 +70,27 @@ you care about, close the game normally, then run
 `psxrecomp\tools\compile_overlays.py --static` and rebuild. Captures contain
 game code and are gitignored; each player makes their own.
 
+### Original or HD
+
+`presets/` holds two ready-made setups, picked with `--preset`:
+
+- `--preset hd`: widescreen, 4x resolution, perspective-correct textures,
+  smoothed movies, Fast Loading and 150% CPU (no slowdown).
+- `--preset original`: plays like the PlayStation: 4:3, native resolution,
+  original loading and speed.
+
+Each keeps its own settings and mod choices in `presets/<name>/` next to the
+exe; the disc choice, controls and memory cards are shared. Add
+`--no-launcher` to skip the launcher.
+
+### Release package
+
+`scripts\package-release.ps1 -Zip` turns a Release build into
+`dist\AzureDreams-HD-Recompiled-<VERSION>.zip`: the exe, OpenBIOS, mods, both
+presets with a `.bat` launcher each, and a player README. It contains no game
+data (the script refuses to package disc images, saves, captures or box art);
+players pick their own disc image on first launch.
+
 ## Findings
 
 Everything discovered while making this port is written up in
@@ -85,6 +106,8 @@ checks and the loading speed-ups, plus the debug commands used to find them.
 | `game.toml` | Game config: identity, video defaults, widescreen cull sites, controller |
 | `src/mod_widescreen.c` | Widescreen mod plugin (view rectangle, HUD, minimap) |
 | `mods/preloaded/packages/` | Mod packages shown in the launcher (widescreen; default-on overrides of Fast Loading and PGXP) |
+| `presets/` | The Original and HD setups (`--preset original` / `--preset hd`) |
+| `scripts/package-release.ps1` | Builds the release zip (no game data) |
 | `patches/` | Fixes applied to the pinned psxrecomp framework |
 | `docs/FINDINGS.md` | **What does what:** addresses and values behind widescreen, the HUD/minimap moves and the speed-ups, and how they were found |
 | `psxrecomp/`, `recomp-ui/` | Framework and launcher submodules (pinned) |

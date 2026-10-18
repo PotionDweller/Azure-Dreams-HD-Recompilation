@@ -1,0 +1,7 @@
+# HD preset (--preset hd): widescreen, 4x resolution, perspective-correct
+# textures, bicubic FMVs, Fast Loading, 150% CPU (game.toml and mod defaults;
+# mod choices in state.toml beside this file). Changes made while playing this
+# preset are saved here and never touch the Original preset.
+
+[video]
+fullscreen = 1

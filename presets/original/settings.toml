@@ -1,0 +1,11 @@
+# Original preset (--preset original): plays like the PS1. 4:3, native
+# resolution, no geometry/texture corrections, unfiltered FMVs. Its mods are
+# all off (state.toml beside this file). Changes made while playing this
+# preset are saved here and never touch the HD preset.
+
+[video]
+fullscreen = 1
+supersampling = 1
+perspective_texturing = false
+geometry_correction = false
+fmv_filter = "nearest"

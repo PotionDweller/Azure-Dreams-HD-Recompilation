@@ -168,7 +168,7 @@ index 00000000..3892d3f7
 +feature = "cpu-overclock"
 +id = "psx.cpu-overclock"
 diff --git a/recompiler/src/config_loader.cpp b/recompiler/src/config_loader.cpp
-index 669e6d4e..0e7785f9 100644
+index 669e6d4e..751a230a 100644
 --- a/recompiler/src/config_loader.cpp
 +++ b/recompiler/src/config_loader.cpp
 @@ -854,6 +854,57 @@ static std::string derive_out_stem(const std::string& rom_basename) {
@@ -247,7 +247,29 @@ index 669e6d4e..0e7785f9 100644
      };
  }
  
-@@ -1373,51 +1428,8 @@ GameConfig load_game_config(const fs::path& config_path_in) {
+@@ -1223,14 +1278,18 @@ GameConfig load_game_config(const fs::path& config_path_in) {
+                    ? auto_hdr.stack_base
+                    : 0x801FFFF0u);
+ 
+-    // Disc paths: accept either single `disc` or array `discs`.
++    // Disc paths: accept either single `disc` or array `discs`. A blank entry
++    // (`disc = ""`, the shipped default: the player picks their own image) is
++    // no disc, not `root / ""` -- that names the game folder itself, which the
++    // runtime then tried to open as the disc instead of asking for one.
+     std::vector<fs::path> discs;
+     if (game.contains("discs")) {
+         const auto& arr = toml::find<std::vector<std::string>>(game, "discs");
+-        for (const auto& d : arr) discs.push_back(fs::absolute(root / d));
++        for (const auto& d : arr)
++            if (!d.empty()) discs.push_back(fs::absolute(root / d));
+     } else if (game.contains("disc")) {
+         const auto& d = toml::find<std::string>(game, "disc");
+-        discs.push_back(fs::absolute(root / d));
++        if (!d.empty()) discs.push_back(fs::absolute(root / d));
+     }
+     /* Per-disc serials, parallel to `discs`. Absent => no per-disc gate. */
+     std::vector<std::string> disc_serials;
+@@ -1373,51 +1432,8 @@ GameConfig load_game_config(const fs::path& config_path_in) {
          out_stem = derive_out_stem(fs::path(exe_field).filename().string());
      }
  
@@ -506,6 +528,41 @@ index df5cb346..2504f8ed 100644
  /* Physical non-XA data-read command state, without the logical load gap
   * bridge used by cdrom_load_in_progress(). Diagnostics only. */
  int cdrom_data_read_active(void);
+diff --git a/runtime/include/freeze_heartbeat.h b/runtime/include/freeze_heartbeat.h
+index e8586982..0b5fdeb1 100644
+--- a/runtime/include/freeze_heartbeat.h
++++ b/runtime/include/freeze_heartbeat.h
+@@ -1,7 +1,7 @@
+ ﻿/* freeze_heartbeat.h — observability infrastructure.
+  *
+  * Starts a background thread that snapshots runtime state to
+- * `psx_freeze_heartbeat.json` every ~100 ms. Survives main-thread
++ * `diagnostics/psx_freeze_heartbeat.json` (next to the exe) every ~100 ms. Survives main-thread
+  * freezes (Windows / SDL "Not Responding") because the writer thread
+  * is independent of the main loop and the debug-server TCP path.
+  *
+@@ -15,6 +15,8 @@
+ #ifndef PSXRECOMP_FREEZE_HEARTBEAT_H
+ #define PSXRECOMP_FREEZE_HEARTBEAT_H
+ 
++#include <stdio.h>
++
+ #ifdef __cplusplus
+ extern "C" {
+ #endif
+@@ -25,6 +27,12 @@ extern "C" {
+  * binary produced the file. */
+ void freeze_heartbeat_start(const char *backend_label);
+ 
++/* Diagnostics files (heartbeat, wedge dumps, last-run report) live in
++ * <exe dir>/diagnostics/, created on first use. `name` is a bare ASCII file
++ * name. psx_diag_replace atomically renames one such file over another. */
++FILE *psx_diag_fopen(const char *name, const char *mode);
++int psx_diag_replace(const char *from_name, const char *to_name);
++
+ #ifdef __cplusplus
+ }
+ #endif
 diff --git a/runtime/include/gpu.h b/runtime/include/gpu.h
 index c831f207..e2d4803e 100644
 --- a/runtime/include/gpu.h
@@ -578,6 +635,32 @@ index ace31f11..16cde508 100644
  } GpuRenderBackend;
  
  #ifdef __cplusplus
+diff --git a/runtime/include/mod_packages.h b/runtime/include/mod_packages.h
+index b4860c92..ffc9101b 100644
+--- a/runtime/include/mod_packages.h
++++ b/runtime/include/mod_packages.h
+@@ -362,6 +362,13 @@ public:
+ 
+     void set_root(std::filesystem::path mods_root);
+     const std::filesystem::path& root() const { return root_; }
++    /* Where the enable/option selections persist: <root>/state.toml unless a
++     * settings preset (--preset) points it at its own file, so presets share
++     * the catalog but not the choices. set_root() restores the default. */
++    void set_state_path(std::filesystem::path path) { state_path_ = std::move(path); }
++    std::filesystem::path state_path() const {
++        return state_path_.empty() ? root_ / "state.toml" : state_path_;
++    }
+     /* Developer-channel features are stripped at scan and install time unless
+      * this is set. Defaults to kDeveloperChannelDefault; tests set it
+      * explicitly so they exercise both a local and a release build. */
+@@ -444,6 +451,7 @@ private:
+                    ModPackageOrigin origin, std::string* error);
+ 
+     std::filesystem::path root_;
++    std::filesystem::path state_path_;
+     bool developer_channel_ = kDeveloperChannelDefault;
+     std::vector<std::string> scan_errors_;
+     std::map<std::string, std::map<std::string, ModPackage>> packages_;
 diff --git a/runtime/include/mod_plugins.h b/runtime/include/mod_plugins.h
 index a1e4645e..0a4c254d 100644
 --- a/runtime/include/mod_plugins.h
@@ -600,6 +683,20 @@ index a1e4645e..0a4c254d 100644
  /* Controller presentation values exposed to trusted game-owned plugins. */
  enum {
      PSX_MOD_CONTROLLER_ANALOG = 1,
+diff --git a/runtime/include/mod_runtime.h b/runtime/include/mod_runtime.h
+index 20a3b847..bdafe6cb 100644
+--- a/runtime/include/mod_runtime.h
++++ b/runtime/include/mod_runtime.h
+@@ -15,7 +15,8 @@ bool mod_runtime_initialize(const std::filesystem::path& root,
+                             const std::string& game_id,
+                             uint32_t game_entry_pc,
+                             const std::filesystem::path& exe_path = {},
+-                            std::string* error = nullptr);
++                            std::string* error = nullptr,
++                            const std::filesystem::path& state_path = {});
+ bool mod_runtime_commit(const std::filesystem::path& disc_path = {},
+                         std::string* error = nullptr);
+ /* Drop the in-session mod plan for a netplay launch without rewriting the
 diff --git a/runtime/include/psx_cyc.h b/runtime/include/psx_cyc.h
 index 4239c123..48c183fd 100644
 --- a/runtime/include/psx_cyc.h
@@ -770,6 +867,38 @@ index 73884657..ba917aa8 100644
  int cdrom_data_read_active(void) {
      return reading && !xa_stream_active;
  }
+diff --git a/runtime/src/crash_trace.c b/runtime/src/crash_trace.c
+index 0fe0d272..50e4b839 100644
+--- a/runtime/src/crash_trace.c
++++ b/runtime/src/crash_trace.c
+@@ -40,7 +40,8 @@
+ #include "cpu_state.h"
+ #include "psx_bss.h"
+ #include "crash_trace.h"
+-#include "autocompile.h"   /* autocompile_degraded_reason — stamp a degraded
++#include "freeze_heartbeat.h"   /* psx_diag_fopen: reports go to diagnostics/ */
++#include "autocompile.h"  /* autocompile_degraded_reason — stamp a degraded
+                             * (interpreter-only) run into its own report */
+ 
+ /* Output path — overwritten per dump. */
+@@ -720,7 +721,7 @@ void psx_crash_trace_dump(const char *reason, void *seh_info) {
+     {
+         size_t safe_pos = pos;
+         append_str(buf, sizeof(buf), &safe_pos, "  \"native_stack\": null\n}\n");
+-        FILE *pf = fopen(kReportPath, "wb");
++        FILE *pf = psx_diag_fopen(kReportPath, "wb");
+         if (pf) { fwrite(buf, 1, safe_pos, pf); fclose(pf); }
+ 
+         uintptr_t sp = 0;
+@@ -802,7 +803,7 @@ void psx_crash_trace_dump(const char *reason, void *seh_info) {
+     append_str(buf, sizeof(buf), &pos, "}\n");
+ 
+     /* Write to file. Overwrite previous report. */
+-    FILE *f = fopen(kReportPath, "wb");
++    FILE *f = psx_diag_fopen(kReportPath, "wb");
+     if (f) {
+         fwrite(buf, 1, pos, f);
+         fclose(f);
 diff --git a/runtime/src/data_shards.c b/runtime/src/data_shards.c
 index 6c3be641..7262e6b3 100644
 --- a/runtime/src/data_shards.c
@@ -941,6 +1070,147 @@ index 3da7fd6f..082c7ae9 100644
          }
      }
      psx_cyc_deps(cpu, reg_mask);
+diff --git a/runtime/src/freeze_heartbeat.c b/runtime/src/freeze_heartbeat.c
+index 3df0fa5f..7839e34e 100644
+--- a/runtime/src/freeze_heartbeat.c
++++ b/runtime/src/freeze_heartbeat.c
+@@ -72,6 +72,7 @@ extern int      g_present_vsync_disabled;
+  * (gpr[32], pc) in cpu_state.h — both already included above. */
+ extern uint8_t *memory_get_scratchpad_ptr(void);   /* memory.c */
+ extern uint8_t *g_psx_ram;                         /* memory.c — 2 MiB DRAM */
++extern int mdec_recently_active(uint32_t within_frames);  /* mdec.c */
+ 
+ static int s_started = 0;
+ static char s_backend[32] = "psx-runtime";
+@@ -86,6 +87,77 @@ static int    s_sym_initialized = 0;
+ #define HB_FILE        "psx_freeze_heartbeat.json"
+ #define HB_INTERVAL_MS 100u
+ 
++/* ---- Diagnostics directory ----
++ * The heartbeat, wedge dumps and last-run report go to <exe dir>/diagnostics/
++ * rather than the working directory: shortcuts and app launchers start the
++ * game from anywhere, and a player's game folder should not fill up with
++ * forensics. Wide paths on Windows so a non-ASCII install folder works. Falls
++ * back to the working directory when the exe path is unavailable. */
++#ifdef _WIN32
++#define DIAG_PATH_CAP (MAX_PATH * 4)
++static wchar_t s_diag_dir[DIAG_PATH_CAP];
++static volatile LONG s_diag_ready = 0;
++
++static void diag_dir_init(void) {
++    if (s_diag_ready) return;
++    wchar_t exe[DIAG_PATH_CAP];
++    DWORD n = GetModuleFileNameW(NULL, exe, DIAG_PATH_CAP);
++    s_diag_dir[0] = 0;
++    if (n > 0 && n < DIAG_PATH_CAP) {
++        wchar_t *slash = wcsrchr(exe, L'\\');
++        static const wchar_t sub[] = L"\\diagnostics";
++        if (slash && (size_t)(slash - exe) + wcslen(sub) < DIAG_PATH_CAP) {
++            *slash = 0;
++            wcscpy(s_diag_dir, exe);
++            wcscat(s_diag_dir, sub);
++            CreateDirectoryW(s_diag_dir, NULL);
++        }
++    }
++    s_diag_ready = 1;
++}
++
++/* name is a plain ASCII file name (no directory). */
++static int diag_wpath(wchar_t *out, size_t cap, const char *name) {
++    diag_dir_init();
++    size_t dir_len = wcslen(s_diag_dir), name_len = strlen(name);
++    if (dir_len + 1 + name_len + 1 > cap) return 0;
++    size_t pos = 0;
++    if (dir_len) {
++        wcscpy(out, s_diag_dir);
++        out[dir_len] = L'\\';
++        pos = dir_len + 1;
++    }
++    for (size_t i = 0; i < name_len; i++) out[pos++] = (wchar_t)(unsigned char)name[i];
++    out[pos] = 0;
++    return 1;
++}
++#endif
++
++FILE *psx_diag_fopen(const char *name, const char *mode) {
++#ifdef _WIN32
++    wchar_t path[DIAG_PATH_CAP + 64], wmode[8];
++    size_t i;
++    if (!diag_wpath(path, sizeof(path) / sizeof(path[0]), name)) return NULL;
++    for (i = 0; mode[i] && i < 7; i++) wmode[i] = (wchar_t)mode[i];
++    wmode[i] = 0;
++    return _wfopen(path, wmode);
++#else
++    return fopen(name, mode);
++#endif
++}
++
++int psx_diag_replace(const char *from_name, const char *to_name) {
++#ifdef _WIN32
++    wchar_t from[DIAG_PATH_CAP + 64], to[DIAG_PATH_CAP + 64];
++    if (!diag_wpath(from, sizeof(from) / sizeof(from[0]), from_name) ||
++        !diag_wpath(to, sizeof(to) / sizeof(to[0]), to_name))
++        return 0;
++    return MoveFileExW(from, to, MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH) ? 1 : 0;
++#else
++    return rename(from_name, to_name) == 0;
++#endif
++}
++
+ /* Wedge detection.
+  *
+  * Three failure modes to catch:
+@@ -124,6 +196,7 @@ static int    s_sym_initialized = 0;
+ #define WEDGE_WINDOW_TICKS 20u
+ #define WEDGE_EXC_REENTRY_PER_FRAME_THRESHOLD 20000u /* ~10x chronic 2K/frame */
+ #define WEDGE_SLOW_FRAMES_MAX_DELTA 10u   /* <5 fps avg over the 2s window */
++#define WEDGE_MDEC_ACTIVE_FRAMES 30u      /* a decode this recent = movie playing */
+ 
+ /* Per-ring caps for auto-dump. Newest-first window. The old 4-16K caps
+  * spanned well under a second of activity — too short to cross a
+@@ -488,7 +561,7 @@ static int freeze_dump_write(long long wall, uint64_t frame, uint64_t cyc,
+         return 0;
+     }
+ 
+-    FILE *f = fopen(path, "wb");
++    FILE *f = psx_diag_fopen(path, "wb");
+     if (!f) { freeze_dump_unlock(); return 0; }
+ 
+     /* Large stdio buffer so multi-MB JSON arrays write efficiently. */
+@@ -800,6 +873,13 @@ static void heartbeat_write(void) {
+             (s_ring[newest_idx].last_store_pc   == s_ring[oldest_idx].last_store_pc) &&
+             (s_ring[newest_idx].dirty_ram_insns == s_ring[oldest_idx].dirty_ram_insns);
+ 
++        /* A movie is the legitimate form of that signature: the game parks in
++         * a wait while MDEC and DMA decode each frame (Azure Dreams' intro
++         * dumped "spin_freeze" on every boot). A game wedged mid-movie stops
++         * decoding, so it still trips once the decoder goes quiet. */
++        if (logic_pinned && mdec_recently_active(WEDGE_MDEC_ACTIVE_FRAMES))
++            logic_pinned = 0;
++
+         if (frame_delta == 0)
+             wedge_kind = 1;
+         else if (excre_delta / frame_delta > WEDGE_EXC_REENTRY_PER_FRAME_THRESHOLD)
+@@ -1047,17 +1127,12 @@ static void heartbeat_write(void) {
+     char tmp_path[64];
+     snprintf(tmp_path, sizeof(tmp_path), HB_FILE ".tmp");
+ 
+-    FILE *f = fopen(tmp_path, "wb");
++    FILE *f = psx_diag_fopen(tmp_path, "wb");
+     if (!f) return;
+     fwrite(buf, 1, (size_t)n, f);
+     fclose(f);
+ 
+-#ifdef _WIN32
+-    MoveFileExA(tmp_path, HB_FILE,
+-                MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH);
+-#else
+-    rename(tmp_path, HB_FILE);
+-#endif
++    psx_diag_replace(tmp_path, HB_FILE);
+ }
+ 
+ #ifdef _WIN32
 diff --git a/runtime/src/gpu.c b/runtime/src/gpu.c
 index 8d91f79a..dcff801f 100644
 --- a/runtime/src/gpu.c
@@ -1352,7 +1622,7 @@ index 848309e2..7eb04344 100644
      return 0;
  }
 diff --git a/runtime/src/main.cpp b/runtime/src/main.cpp
-index 022b1baa..af3d8fc5 100644
+index 022b1baa..45599039 100644
 --- a/runtime/src/main.cpp
 +++ b/runtime/src/main.cpp
 @@ -1,4 +1,4 @@
@@ -1361,7 +1631,49 @@ index 022b1baa..af3d8fc5 100644
   *
   * Loads BIOS ROM, initializes CPU state + SDL display, calls into
   * the recompiled reset vector. BIOS drives execution; SDL presents
-@@ -1536,6 +1536,19 @@ extern "C" int psx_mod_set_disc_speed(
+@@ -227,6 +227,16 @@ extern "C" void     dirty_ram_register_text_image(uint32_t phys_lo,
+  *   2. The boot EXE extracted from the mounted disc image (end-user installs
+  *      — the disc is the same bytes the BIOS loads, i.e. the true reference).
+  * Registration passes ownership of the malloc'd buffer to memory.c. */
++/* The text length the BIOS actually loads: the PS-X EXE header's t_size (0x1C),
++ * not the file length. Discs can pad the boot EXE (Azure Dreams: a 512 KB file
++ * holding 340 KB of text), and RAM past t_size is the game's data/overlays. */
++static uint32_t psx_exe_text_len(const uint8_t *hdr, uint64_t body_len) {
++    const uint32_t t_size = (uint32_t)hdr[0x1C] | ((uint32_t)hdr[0x1D] << 8) |
++                            ((uint32_t)hdr[0x1E] << 16) | ((uint32_t)hdr[0x1F] << 24);
++    if (t_size == 0 || t_size > body_len) return (uint32_t)body_len;
++    return t_size;
++}
++
+ static void arm_text_image_guard(const std::string &exe_path,
+                                  uint32_t load_address,
+                                  const std::string &disc_path) {
+@@ -236,11 +246,12 @@ static void arm_text_image_guard(const std::string &exe_path,
+         std::ifstream ef(exe_path, std::ios::binary | std::ios::ate);
+         if (ef) {
+             std::streamsize sz = ef.tellg();
+-            if (sz > 2048) {
+-                uint32_t img_len = (uint32_t)(sz - 2048);
++            uint8_t hdr[2048];
++            if (sz > 2048 && ef.seekg(0, std::ios::beg) &&
++                ef.read((char *)hdr, sizeof(hdr))) {
++                uint32_t img_len = psx_exe_text_len(hdr, (uint64_t)(sz - 2048));
+                 uint8_t *img = (uint8_t *)std::malloc(img_len);
+                 if (img) {
+-                    ef.seekg(2048, std::ios::beg);
+                     if (ef.read((char *)img, img_len)) {
+                         dirty_ram_register_text_image(phys_lo, img, img_len);
+                         std::fprintf(stdout,
+@@ -300,7 +311,7 @@ static void arm_text_image_guard(const std::string &exe_path,
+                 if (file) {
+                     size_t got = iso.ReadFile(boot_name, file, ent.size);
+                     if (got > 2048) {
+-                        uint32_t img_len = (uint32_t)(got - 2048);
++                        uint32_t img_len = psx_exe_text_len(file, got - 2048);
+                         uint8_t *img = (uint8_t *)std::malloc(img_len);
+                         if (img) {
+                             memcpy(img, file + 2048, img_len);
+@@ -1536,6 +1547,19 @@ extern "C" int psx_mod_set_disc_speed(
      return 1;
  }
  
@@ -1381,7 +1693,7 @@ index 022b1baa..af3d8fc5 100644
  extern "C" int psx_mod_set_controller_mode_override(
      uint32_t player, uint32_t controller_mode) {
      if (player >= PSX_MAX_PLAYERS ||
-@@ -1621,6 +1634,17 @@ static void clamp_window_aspect(int* w, int* h, int num, int den) {
+@@ -1621,6 +1645,17 @@ static void clamp_window_aspect(int* w, int* h, int num, int den) {
      *h = width * den / num;
  }
  
@@ -1399,7 +1711,7 @@ index 022b1baa..af3d8fc5 100644
  static int aspect_gcd(int a, int b) {
      while (b) { int t = a % b; a = b; b = t; }
      return a > 0 ? a : 1;
-@@ -2048,6 +2072,13 @@ uint64_t g_turbo_loads_frames  = 0;   /* vblanks run unpaced (observability) */
+@@ -2048,6 +2083,13 @@ uint64_t g_turbo_loads_frames  = 0;   /* vblanks run unpaced (observability) */
  int      g_turbo_audio_sink_enabled = 0;
  int      g_turbo_audio_sink_active = 0;
  uint64_t g_turbo_audio_sink_frames = 0; /* guest SPU frames advanced, not queued */
@@ -1413,7 +1725,7 @@ index 022b1baa..af3d8fc5 100644
  }
  static int g_turbo_audio_sink_config_enabled = 0;
  /* The CD predicate already excludes XA and holds across ordinary inter-file
-@@ -2058,6 +2089,24 @@ static int g_turbo_audio_sink_config_enabled = 0;
+@@ -2058,6 +2100,24 @@ static int g_turbo_audio_sink_config_enabled = 0;
   * advancing normally. */
  #define TURBO_LOADS_ENGAGE_FRAMES  4
  #define TURBO_LOADS_RELEASE_FRAMES 6
@@ -1438,7 +1750,26 @@ index 022b1baa..af3d8fc5 100644
  /* Zero multiplier retains the historical uncapped turbo behavior. */
  static int g_turbo_load_wall_multiplier = 0;
  static int g_turbo_load_release_frames = TURBO_LOADS_RELEASE_FRAMES;
-@@ -6562,6 +6611,12 @@ static NetplayVblankEpilogue sdl_vblank_present_body(void) {
+@@ -2180,6 +2240,18 @@ static std::filesystem::path sidecar_cfg_path(const char* argv0, const char* fil
+     return exe_dir_from_argv(argv0) / filename;
+ }
+ 
++// --preset <name>: an independent set of user settings (settings.toml and the
++// mod selections) under <exe_dir>/presets/<name>/, so one install can offer
++// e.g. an authentic and an enhanced way to play from two shortcuts. The disc
++// and BIOS picks, input bindings, mod catalog and memory cards stay shared
++// next to the exe. Empty = no preset: everything lives next to the exe.
++static std::string g_preset;
++
++static std::filesystem::path user_settings_dir(const char* argv0) {
++    const std::filesystem::path exe_dir = exe_dir_from_argv(argv0);
++    return g_preset.empty() ? exe_dir : exe_dir / "presets" / g_preset;
++}
++
+ static std::filesystem::path read_cached_path(const char* argv0, const char* filename) {
+     std::ifstream f(sidecar_cfg_path(argv0, filename));
+     if (!f.is_open()) return {};
+@@ -6562,6 +6634,12 @@ static NetplayVblankEpilogue sdl_vblank_present_body(void) {
                  psx_crash_trace_set_exit_origin("sdl_window_close");
                  shutdown_runtime();
                  std::exit(0);
@@ -1451,7 +1782,7 @@ index 022b1baa..af3d8fc5 100644
              } else if (ev.type == SDL_CONTROLLERDEVICEADDED) {
                  refresh_player_devices();
              } else if (ev.type == SDL_CONTROLLERDEVICEREMOVED) {
-@@ -6653,6 +6708,20 @@ static NetplayVblankEpilogue sdl_vblank_present_body(void) {
+@@ -6653,6 +6731,20 @@ static NetplayVblankEpilogue sdl_vblank_present_body(void) {
                                     SDL_WINDOW_FULLSCREEN;
                      if (is_fs) {
                          SDL_SetWindowFullscreen(sdl_window, 0);
@@ -1472,7 +1803,7 @@ index 022b1baa..af3d8fc5 100644
                          host_osd_push("Windowed", 1500);
                      } else {
                          /* If the configured mode is "off", the hotkey still
-@@ -6739,8 +6808,30 @@ static NetplayVblankEpilogue sdl_vblank_present_body(void) {
+@@ -6739,8 +6831,30 @@ static NetplayVblankEpilogue sdl_vblank_present_body(void) {
  
      /* Turbo-active test shared by the pacing/present gate below. */
      int turbo_loads_active = 0;
@@ -1505,7 +1836,7 @@ index 022b1baa..af3d8fc5 100644
      int load_run_value = 0;
      static int load_run = 0;
      static int release_run = 0;
-@@ -6768,6 +6859,44 @@ static NetplayVblankEpilogue sdl_vblank_present_body(void) {
+@@ -6768,6 +6882,44 @@ static NetplayVblankEpilogue sdl_vblank_present_body(void) {
          load_run = 0;
          release_run = 0;
      }
@@ -1550,7 +1881,84 @@ index 022b1baa..af3d8fc5 100644
      /* HLE boot-skip window: from reset until the game entry PC first
       * dispatches, run unpaced so the (shell-skipped) BIOS kernel init +
       * SYSTEM.CNF + game EXE load compress to host speed. This replaces the
-@@ -13138,8 +13267,11 @@ int main(int argc, char** argv) {
+@@ -11045,7 +11197,8 @@ int main(int argc, char** argv) {
+      *   --debug-port <n>    override the TCP debug-server port (multi-instance)
+      *   --memcard-dir <path> override card/save/options state (multi-instance)
+      *   --renderer <name>   override the renderer: software|opengl|vulkan
+-     *   --launcher          force the GUI launcher (overrides skip_launcher)
++     *   --preset <name>     use the settings + mod selections in presets/<name>/
++     *   --launcher         force the GUI launcher (overrides skip_launcher)
+      *   --no-launcher       skip the GUI launcher (boot straight in)
+      *   --headless          skip SDL window/audio; use TCP screenshots/state
+      *   --netplay           enable delay-sync LAN (also PSX_NETPLAY=1)
+@@ -11075,6 +11228,20 @@ int main(int argc, char** argv) {
+             if      (std::strcmp(r, "software") == 0) cli_renderer = 0;
+             else if (std::strcmp(r, "opengl")   == 0) cli_renderer = 1;
+             else if (std::strcmp(r, "vulkan")   == 0) cli_renderer = 2;
++        } else if (std::strcmp(argv[i], "--preset") == 0 && i + 1 < argc) {
++            /* A name, never a path: it becomes a directory under presets/. */
++            const std::string name = argv[++i];
++            const bool valid = !name.empty() && name.size() <= 64 &&
++                std::all_of(name.begin(), name.end(), [](char c) {
++                    return std::isalnum((unsigned char)c) || c == '-' || c == '_';
++                });
++            if (valid) {
++                g_preset = name;
++            } else {
++                std::fprintf(stderr,
++                    "psxrecomp: ignoring --preset \"%s\" (use letters, digits, - or _)\n",
++                    name.c_str());
++            }
+         } else if (std::strcmp(argv[i], "--window-title") == 0 && i + 1 < argc) {
+             cli_window_title = argv[++i];
+         } else if (std::strcmp(argv[i], "--launcher") == 0) {
+@@ -11693,7 +11860,10 @@ int main(int argc, char** argv) {
+     bool user_settings_has_renderer = false;
+     {
+         std::filesystem::path settings_path =
+-            exe_dir_from_argv(argv[0]) / "settings.toml";
++            user_settings_dir(argv[0]) / "settings.toml";
++        if (!g_preset.empty())
++            std::fprintf(stdout, "psxrecomp: settings preset \"%s\" -> %s\n",
++                         g_preset.c_str(), settings_path.parent_path().string().c_str());
+ #if defined(RECOMP_LAUNCHER)
+         g_lnch_settings_path = settings_path;
+ #endif
+@@ -12024,14 +12194,17 @@ int main(int argc, char** argv) {
+         }
+     }
+ 
+-    /* Scan <exe_dir>/mods and load persisted enable/option state. Everything
+-     * downstream — the launcher Mods tab (gi.mods), disc patching, the
+-     * psx_mod_set_* callbacks — is inert until this runs. */
++    /* Scan <exe_dir>/mods and load persisted enable/option state (a preset
++     * keeps its own state.toml). Everything downstream — the launcher Mods tab
++     * (gi.mods), disc patching, the psx_mod_set_* callbacks — is inert until
++     * this runs. */
+     {
+         std::string mod_error;
+         if (!PSXRecompV4::mod_runtime_initialize(
+                 exe_dir_from_argv(argv[0]) / "mods", game_id,
+-                game_entry_pc, text_guard_exe_path, &mod_error)) {
++                game_entry_pc, text_guard_exe_path, &mod_error,
++                g_preset.empty() ? std::filesystem::path()
++                                 : user_settings_dir(argv[0]) / "state.toml")) {
+             std::fprintf(stderr, "psxrecomp: mods unavailable: %s\n",
+                          mod_error.c_str());
+         }
+@@ -13070,9 +13243,9 @@ int main(int argc, char** argv) {
+                     if (seed.has_deadzone) resolved_deadzone = seed.deadzone;
+                 }
+                 g_video_win_w = seed.window_width;
+-                /* Persist the user's choices next to the exe. */
++                /* Persist the user's choices next to the exe (or in the preset). */
+                 PSXRecompV4::save_user_settings(
+-                    exe_dir_from_argv(argv[0]) / "settings.toml", seed);
++                    user_settings_dir(argv[0]) / "settings.toml", seed);
+             }
+         }
+     }
+@@ -13138,8 +13311,11 @@ int main(int argc, char** argv) {
          /* Fast Loading advances the guest at a host rate greater than real
           * time. Keep the canonical SPU/CD stream running, but discard the
           * accelerated presentation-side audio until pacing resumes; otherwise
@@ -1564,7 +1972,7 @@ index 022b1baa..af3d8fc5 100644
          if (g_turbo_load_wall_multiplier) {
              std::fprintf(stdout,
                  "psxrecomp: mod selected %dx load acceleration "
-@@ -13356,9 +13488,16 @@ session_reboot:
+@@ -13356,9 +13532,16 @@ session_reboot:
          g_video_perspective_texturing = (*e && *e != '0') ? 1 : 0;
      if (const char* e = std::getenv("PSX_PGXP_CPU_MODE"))
          g_video_pgxp_cpu_mode = (*e && *e != '0') ? 1 : 0;
@@ -1584,6 +1992,15 @@ index 022b1baa..af3d8fc5 100644
      pgxp_set_tolerance(g_video_pgxp_tolerance);
      /* Scanlines: env override wins over config, same as the corrections above,
       * so a headless/free-run boot can be captured with the effect armed from the
+@@ -14724,7 +14907,7 @@ soft_return_lobby:
+              * the rest of settings.toml — merge into the on-disk file. */
+             {
+                 const auto settings_path =
+-                    exe_dir_from_argv(argv[0]) / "settings.toml";
++                    user_settings_dir(argv[0]) / "settings.toml";
+                 PSXRecompV4::UserSettings us =
+                     PSXRecompV4::load_user_settings(settings_path);
+                 const int un = std::min(PSX_MAX_PLAYERS,
 diff --git a/runtime/src/memory.c b/runtime/src/memory.c
 index 75f08675..e9de8a01 100644
 --- a/runtime/src/memory.c
@@ -1638,6 +2055,68 @@ index c48dceea..b04d90af 100644
 +    (void)psx_mod_register_activation_plugin(
 +        "psx.cpu-overclock", builtin_cpu_overclock_activate);
  }
+diff --git a/runtime/src/mod_packages.cpp b/runtime/src/mod_packages.cpp
+index 150a5a3d..eb00b5f3 100644
+--- a/runtime/src/mod_packages.cpp
++++ b/runtime/src/mod_packages.cpp
+@@ -1534,6 +1534,7 @@ ModPackageManager::ModPackageManager(fs::path mods_root) : root_(std::move(mods_
+ 
+ void ModPackageManager::set_root(fs::path mods_root) {
+     root_ = std::move(mods_root);
++    state_path_.clear();
+     packages_.clear();
+     selections_.clear();
+ }
+@@ -2512,7 +2513,7 @@ bool ModPackageManager::scan(std::string* error) {
+ 
+ bool ModPackageManager::load_state(std::string* error) {
+     selections_.clear();
+-    const fs::path path = root_ / "state.toml";
++    const fs::path path = state_path();
+     if (!fs::exists(path)) return true;
+     try {
+         const toml::value cfg = toml::parse(path.string());
+@@ -2594,14 +2595,15 @@ bool ModPackageManager::load_state(std::string* error) {
+ }
+ 
+ bool ModPackageManager::save_state(std::string* error) const {
++    const fs::path final = state_path();
++    fs::path temp = final;
++    temp += ".tmp";
+     std::error_code ec;
+-    fs::create_directories(root_, ec);
++    fs::create_directories(final.parent_path(), ec);
+     if (ec) {
+         set_error(error, "cannot create mods directory: " + ec.message());
+         return false;
+     }
+-    const fs::path temp = root_ / "state.toml.tmp";
+-    const fs::path final = root_ / "state.toml";
+     std::ofstream out(temp, std::ios::trunc);
+     if (!out) {
+         set_error(error, "cannot write " + temp.string());
+diff --git a/runtime/src/mod_runtime.cpp b/runtime/src/mod_runtime.cpp
+index 3f8b5765..a1337605 100644
+--- a/runtime/src/mod_runtime.cpp
++++ b/runtime/src/mod_runtime.cpp
+@@ -1097,7 +1097,8 @@ bool mod_runtime_initialize(const std::filesystem::path& root,
+                             const std::string& game_id,
+                             uint32_t game_entry_pc,
+                             const std::filesystem::path& exe_path,
+-                            std::string* error) {
++                            std::string* error,
++                            const std::filesystem::path& state_path) {
+     RuntimeMods& s = state();
+     s.manager.set_root({});
+     s.plan = {};
+@@ -1118,6 +1119,7 @@ bool mod_runtime_initialize(const std::filesystem::path& root,
+     s.disc_enabled = false;
+     s.disc_guard_failed = false;
+     s.manager.set_root(root);
++    s.manager.set_state_path(state_path);
+     s.game_id = game_id;
+     s.entry_phys = game_entry_pc & 0x1FFFFFFFu;
+     if (!s.manager.scan(&s.error) || !s.manager.load_state(&s.error)) {
 diff --git a/runtime/src/overlay_loader.c b/runtime/src/overlay_loader.c
 index a2b32480..f654ec9e 100644
 --- a/runtime/src/overlay_loader.c
