@@ -52,14 +52,23 @@ static const int16_t k_hud_left_stock_y[4] = { -138, -86, -138, -82 };
 #define MINIMAP_STOCK_X     256
 #define MINIMAP_STOCK_Y     120
 /* The map is clipped to a window RECT in the first argument's struct: $a0+4 =
- * {x 213, y 56, w 107, h 112} (right edge = 319, the 4:3 edge), with a copy of
- * {x, y} at +12. The window must move with the anchor; the native-wide
- * renderer (local psxrecomp patch) mirrors such framebuffer clip windows into
- * the reveal strip and keeps the canonical draw inside the framebuffer. */
+ * {x 213, y 56, w 107, h 112} (right edge = 319, the 4:3 edge). The window
+ * must move with the anchor; the native-wide renderer (local psxrecomp patch)
+ * mirrors such framebuffer clip windows into the reveal strip and keeps the
+ * canonical draw inside the framebuffer.
+ *
+ * The same struct holds the small map's resting layout: a target RECT at +12
+ * and a target anchor at +20/+22. func_8009E038 (the map's per-frame task)
+ * animates between the full-screen map and that layout and, when the
+ * animation ends, copies the targets over the live RECT and anchor and saves
+ * the target RECT to MINIMAP_WIN_SAVED, which goes into the memory card save.
+ * So the targets must be widened too (or every map toggle snaps back to the
+ * 4:3 layout), and the saved copy must be kept stock. */
 #define MINIMAP_WIN_STOCK_X 213
 #define MINIMAP_WIN_STOCK_Y 56
 #define MINIMAP_WIN_STOCK_W 107
 #define MINIMAP_WIN_STOCK_H 112
+#define MINIMAP_WIN_SAVED   0x80013630u /* boot EXE data, 4 x int16 */
 /* Stock, the window reaches 64 px right of and above the map anchor (256, 120)
  * but only 43 px left and 48 px below, so larger maps were cut off on the left
  * and bottom. With the map on the wide edge the window is grown to 64 px on
@@ -94,6 +103,52 @@ static void anchor_left_hud(int32_t margin) {
                            (uint16_t)(int16_t)(k_hud_left_stock_x[i] - margin));
 }
 
+static int minimap_rect_is(uint32_t a, int32_t x, int32_t y, int32_t w, int32_t h) {
+    return (int16_t)psx_mod_read_half(a)      == x &&
+           (int16_t)psx_mod_read_half(a + 2u) == y &&
+           (int16_t)psx_mod_read_half(a + 4u) == w &&
+           (int16_t)psx_mod_read_half(a + 6u) == h;
+}
+
+/* Stock, or left behind by an older build of this mod (x shifted by the
+ * margin, never grown). */
+static int minimap_rect_is_narrow(uint32_t a, int32_t margin) {
+    return minimap_rect_is(a, MINIMAP_WIN_STOCK_X, MINIMAP_WIN_STOCK_Y,
+                           MINIMAP_WIN_STOCK_W, MINIMAP_WIN_STOCK_H) ||
+           minimap_rect_is(a, MINIMAP_WIN_STOCK_X + margin, MINIMAP_WIN_STOCK_Y,
+                           MINIMAP_WIN_STOCK_W, MINIMAP_WIN_STOCK_H);
+}
+
+static void minimap_widen_rect(uint32_t a, int32_t margin) {
+    if (!minimap_rect_is_narrow(a, margin)) return;
+    psx_mod_write_half(a, (uint16_t)(int16_t)(MINIMAP_WIN_WIDE_X + margin));
+    psx_mod_write_half(a + 4u, (uint16_t)MINIMAP_WIN_WIDE_W);
+    psx_mod_write_half(a + 6u, (uint16_t)MINIMAP_WIN_WIDE_H);
+}
+
+/* x at a, y at a + y_off. */
+static void minimap_widen_anchor(uint32_t a, uint32_t y_off, int32_t margin) {
+    if ((int16_t)psx_mod_read_half(a) == MINIMAP_STOCK_X &&
+        (int16_t)psx_mod_read_half(a + y_off) == MINIMAP_STOCK_Y)
+        psx_mod_write_half(a, (uint16_t)(int16_t)(MINIMAP_STOCK_X + margin));
+}
+
+/* Keep the saved window (memory card) stock, so saves load the same with
+ * widescreen off; this also repairs saves made with the older mod. The game
+ * checksums its save data, so this must only run while the map is drawn in a
+ * dungeon, never during a load or save: rewriting it from the vblank plugin
+ * made loading an x = 266 save fail ("Failed to load data"). */
+static void minimap_restore_saved(int32_t margin) {
+    if (!minimap_rect_is(MINIMAP_WIN_SAVED, MINIMAP_WIN_WIDE_X + margin, MINIMAP_WIN_STOCK_Y,
+                         MINIMAP_WIN_WIDE_W, MINIMAP_WIN_WIDE_H) &&
+        !minimap_rect_is(MINIMAP_WIN_SAVED, MINIMAP_WIN_STOCK_X + margin, MINIMAP_WIN_STOCK_Y,
+                         MINIMAP_WIN_STOCK_W, MINIMAP_WIN_STOCK_H))
+        return;
+    psx_mod_write_half(MINIMAP_WIN_SAVED,      (uint16_t)MINIMAP_WIN_STOCK_X);
+    psx_mod_write_half(MINIMAP_WIN_SAVED + 4u, (uint16_t)MINIMAP_WIN_STOCK_W);
+    psx_mod_write_half(MINIMAP_WIN_SAVED + 6u, (uint16_t)MINIMAP_WIN_STOCK_H);
+}
+
 static void azure_widescreen_vblank(void) {
     if (!psx_mod_game_started()) return;
     const int32_t margin = psx_mod_widescreen_x_margin();
@@ -114,22 +169,13 @@ static void azure_widescreen_minimap_entry(struct CPUState *cpu, uint32_t addres
     if ((win & 0xFFE00000u) != 0x80000000u ||
         (state & 0xFFE00000u) != 0x80000000u) return;   /* main RAM only */
 
-    /* Window: move and grow only an exact stock RECT (and shift its x copy at
-     * +12 as before). */
-    if ((int16_t)psx_mod_read_half(win + 4u)  == MINIMAP_WIN_STOCK_X &&
-        (int16_t)psx_mod_read_half(win + 6u)  == MINIMAP_WIN_STOCK_Y &&
-        (int16_t)psx_mod_read_half(win + 8u)  == MINIMAP_WIN_STOCK_W &&
-        (int16_t)psx_mod_read_half(win + 10u) == MINIMAP_WIN_STOCK_H) {
-        psx_mod_write_half(win + 4u, (uint16_t)(int16_t)(MINIMAP_WIN_WIDE_X + margin));
-        psx_mod_write_half(win + 8u, (uint16_t)MINIMAP_WIN_WIDE_W);
-        psx_mod_write_half(win + 10u, (uint16_t)MINIMAP_WIN_WIDE_H);
-        if ((int16_t)psx_mod_read_half(win + 12u) == MINIMAP_WIN_STOCK_X)
-            psx_mod_write_half(win + 12u, (uint16_t)(int16_t)(MINIMAP_WIN_STOCK_X + margin));
-    }
-    /* Map content anchor. */
-    if ((int16_t)psx_mod_read_half(state + 2u) == MINIMAP_STOCK_X &&
-        (int16_t)psx_mod_read_half(state + 6u) == MINIMAP_STOCK_Y)
-        psx_mod_write_half(state + 2u, (uint16_t)(int16_t)(MINIMAP_STOCK_X + margin));
+    /* Only exact 4:3 layouts are touched, so mid-animation values (and the
+     * full-screen map, anchored at 160) are left alone. */
+    minimap_widen_rect(win + 4u, margin);      /* live window */
+    minimap_widen_rect(win + 12u, margin);     /* resting window */
+    minimap_widen_anchor(win + 20u, 2u, margin);   /* resting anchor */
+    minimap_widen_anchor(state + 2u, 4u, margin);  /* live anchor */
+    minimap_restore_saved(margin);
 }
 
 PSX_MOD_CONSTRUCTOR(azure_register_widescreen_plugin) {

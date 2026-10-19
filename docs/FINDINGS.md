@@ -15,8 +15,10 @@ in town and in the tower; hooks check stock values before changing anything.
 | GTE screen-extent rejects | immediates `0x181` (385) / `0x121` (289) | 320x224 + 32 px | widened by margin | `game.toml` `[widescreen.cull]` |
 | Left HUD panel (LV / HP) anchors | `0x800E2924`, 4 x `{int16 x, int16 y}` | x {-196, -140, -90, -34}, y {-138, -86, -138, -82} | x - m | `src/mod_widescreen.c` |
 | Dungeon minimap routine | `0x8009E798` (dungeon overlay) | prologue `0x27BDFFB8`, `+8` `0x00A0B021` | hooked at entry | `src/mod_widescreen.c` |
-| Minimap clip window | `$a0 + 4` RECT, copy of x at `$a0 + 12` | {213, 56, 107, 112} | → {192 + m, 56, 128, 128} | `src/mod_widescreen.c` |
-| Minimap content anchor | `$a1 + 2` (x), `$a1 + 6` (y) | 256, 120 | x + m | `src/mod_widescreen.c` |
+| Minimap clip window (live / resting) | `$a0 + 4` / `$a0 + 12` RECTs | {213, 56, 107, 112} | → {192 + m, 56, 128, 128} | `src/mod_widescreen.c` |
+| Minimap content anchor (live / resting) | `$a1 + 2` x, `+6` y / `$a0 + 20` x, `+22` y | 256, 120 | x + m | `src/mod_widescreen.c` |
+| Minimap map task (open/close animation) | `func_8009E038` (dungeon overlay), task fn at `$a0 - 16` | — | not hooked | — |
+| Saved minimap window (in the memory card save) | `0x80013630` RECT | {213, 56, 107, 112} | kept stock | `src/mod_widescreen.c` |
 | Controller type | `game.toml` `[controller]` | — | `lock_mode = true` (digital) | `game.toml` |
 | Fast Loading engage | framework `main.cpp` | 4 frames | 90-frame CD burst; bulk memory-card transfers | `patches/` |
 
@@ -75,6 +77,25 @@ in town and in the tower; hooks check stock values before changing anything.
   maps, so the mod also grows it to 64 px on every side. At the most zoomed-out level the map
   is small and centred in its window, so it does not touch the edge; that is
   the game's own layout.
+- **Minimap off-centre after a prompt (fixed):** the hook only runs when the
+  map is redrawn (e.g. when the player moves), not every frame. The same
+  struct holds the small map's resting layout, a RECT at `$a0 + 12` and an
+  anchor at `$a0 + 20/22`. `func_8009E038`, the map's per-frame task,
+  animates between the full-screen map and that layout (the elevator prompt
+  triggers it), and when the animation ends it copies the resting values over
+  the live ones and saves the resting RECT to `0x80013630`. The first version
+  only shifted the resting x and left the resting anchor at 256, so after any
+  prompt the map sat at 256 behind a 107-px window at x 266: the left side,
+  often with the player marker, was clipped until the next step. Both layouts
+  are now widened. Found by reading the struct live over the debug server and
+  disassembling `func_8009E038` from RAM.
+- **Saved window and the save checksum:** `0x80013630` is part of the memory
+  card save, so a widened value would follow the save into 4:3 play (saves
+  made with the first version hold x = 266). The hook puts it back to stock,
+  and that only happens while the map is drawn in the tower. Rewriting it from
+  the VBlank plugin made loading such a save fail with "Failed to load data":
+  the game checksums the save data after reading it, and the mod changed it
+  in between.
 
 ## Speed-ups
 
