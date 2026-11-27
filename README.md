@@ -20,6 +20,8 @@ Widescreen setup; turn everything off for the original experience.
 | PGXP precision | on | No polygon wobble; perspective-correct textures (separate checkbox). |
 | Fast loading | on (uncapped) | Includes in-game saves and loads: about 2–3 s instead of 17–22 s. |
 | Movie filter | bicubic | Smoother upscaling of movies and the title art. |
+| CPU overclock | 150 % | Removes the original slowdown on busy tower floors. Drops to normal speed while a movie plays (movies gain nothing from it). |
+| CRT filter | off | Scanlines and/or a soft composite-cable look, with darkness and softness sliders. In game: F6 cycles the look, Shift+F6 / Ctrl+F6 adjust darkness / softness; changes are saved. |
 | Borderless fullscreen | on* | Alt+Enter toggles a maximised window; Alt+F4 quits. |
 
 \* Set by the portable package; a fresh source build starts windowed.

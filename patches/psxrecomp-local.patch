@@ -167,6 +167,77 @@ index 00000000..3892d3f7
 +[[plugin]]
 +feature = "cpu-overclock"
 +id = "psx.cpu-overclock"
+diff --git a/mods/builtin/packages/psx.presentation.crt/1.0.0/manifest.toml b/mods/builtin/packages/psx.presentation.crt/1.0.0/manifest.toml
+new file mode 100644
+index 00000000..e9e7c836
+--- /dev/null
++++ b/mods/builtin/packages/psx.presentation.crt/1.0.0/manifest.toml
+@@ -0,0 +1,65 @@
++format_version = 6
++id = "psx.presentation.crt"
++version = "1.0.0"
++name = "CRT Filter"
++author = "psxrecomp"
++description = "Old-TV looks for the picture: scanlines and/or a soft composite-cable blur. Presentation only: the game never sees it, and turning it off restores the normal picture exactly."
++resolver = "declarative"
++save_compatibility = "shared"
++
++# A presentation effect of the host display, not of any particular disc.
++[[target]]
++game_id = "*"
++
++[[feature]]
++id = "crt"
++name = "CRT Filter"
++description = "Disabled by default. Makes the picture look like it is on an old CRT television. Applies to gameplay, menus and movies. Needs the OpenGL renderer (the default). Scanlines appear once the window is at least about twice the console's resolution; fullscreen is ideal. In game, F6 cycles Off / Scanlines / Soft composite / both, Shift+F6 changes scanline darkness and Ctrl+F6 softness; your changes are saved."
++group = "Visual"
++default_enabled = false
++
++[[option]]
++feature = "crt"
++id = "look"
++label = "Look"
++description = "Scanlines: dark gaps between the console's lines. Soft composite: the slight horizontal blur and colour bleed of a composite video cable. Or both together."
++type = "choice"
++default = "scanlines"
++
++[[option.choice]]
++value = "scanlines"
++label = "Scanlines"
++
++[[option.choice]]
++value = "composite"
++label = "Soft composite"
++
++[[option.choice]]
++value = "composite-scanlines"
++label = "Soft composite + scanlines"
++
++[[option]]
++feature = "crt"
++id = "scanline_strength"
++label = "Scanline darkness (%)"
++description = "How dark the gaps between lines are. 0 is invisible, 100 is fully black. In game: Shift+F6 steps it by 10%."
++type = "integer"
++min = 0
++max = 100
++step = 5
++default = 30
++
++[[option]]
++feature = "crt"
++id = "softness"
++label = "Softness (%)"
++description = "How much the soft composite look blurs and bleeds colour sideways. About 40 is a typical composite cable. In game: Ctrl+F6 steps it by 10%."
++type = "integer"
++min = 0
++max = 100
++step = 5
++default = 40
++
++[[plugin]]
++feature = "crt"
++id = "psx.crt"
 diff --git a/recompiler/src/config_loader.cpp b/recompiler/src/config_loader.cpp
 index 669e6d4e..751a230a 100644
 --- a/recompiler/src/config_loader.cpp
@@ -595,10 +666,21 @@ index c831f207..e2d4803e 100644
  uint32_t gpu_gp0_ring_capacity(void);
  uint32_t gpu_gp0_ring_max_words(void);
 diff --git a/runtime/include/gpu_gl_renderer.h b/runtime/include/gpu_gl_renderer.h
-index 26aa5417..52af75ec 100644
+index 26aa5417..4968b2d4 100644
 --- a/runtime/include/gpu_gl_renderer.h
 +++ b/runtime/include/gpu_gl_renderer.h
-@@ -158,6 +158,11 @@ enum {
+@@ -129,6 +129,10 @@ void gl_renderer_set_display_aspect(int num, int den);
+  * scanlines returns the on flag and (via out-param) the current strength. */
+ void gl_renderer_set_scanlines(int on, float strength);
+ int  gl_renderer_get_scanlines(float *strength);
++/* Soft-composite post-process (host display setting): a YIQ horizontal blur at
++ * the PS1 pixel pitch, narrow for luma and wide for chroma, like a composite
++ * cable. strength (0.25..2, 1 = typical) scales both blur widths. */
++void gl_renderer_set_composite(int on, float strength);
+ 
+ /* Select full native-wide mirror rendering instead of the centre-splice fast
+  * path. Textured edge expansion needs the complete mirror surface. */
+@@ -158,6 +162,11 @@ enum {
      GL_COH_UPLOAD   = 9,   /* bulk CPU->VRAM transfer_in dest rect    */
      GL_COH_PEEK     = 10,  /* gl_fbo_peek probe (perturbs: flushes)   */
      GL_COH_DIFF     = 11,  /* gl_vram_diff probe (perturbs: flushes)  */
@@ -662,10 +744,27 @@ index b4860c92..ffc9101b 100644
      std::vector<std::string> scan_errors_;
      std::map<std::string, std::map<std::string, ModPackage>> packages_;
 diff --git a/runtime/include/mod_plugins.h b/runtime/include/mod_plugins.h
-index a1e4645e..0a4c254d 100644
+index a1e4645e..73edfd6e 100644
 --- a/runtime/include/mod_plugins.h
 +++ b/runtime/include/mod_plugins.h
-@@ -195,6 +195,17 @@ int psx_mod_set_load_acceleration(uint32_t wall_clock_multiplier,
+@@ -160,6 +160,16 @@ int psx_mod_set_auto_skip_fmv(int enabled);
+  * mod/resource path, the margins remain the historical black clear.
+  */
+ int psx_mod_set_bezel_artwork(const char* path);
++/*
++ * CRT-style presentation filters (OpenGL renderer). scanlines/composite turn
++ * the two effects on or off; scanline_pct (0..100) is the darkness of the gap
++ * between lines and softness_pct (0..100) the composite blur width. The
++ * player can then adjust all three live with the Scanlines hotkey family.
++ * Presentation only: the guest never sees it. Returns 0 for out-of-range
++ * percentages.
++ */
++int psx_mod_set_crt_filter(int scanlines, int composite,
++                           uint32_t scanline_pct, uint32_t softness_pct);
+ 
+ /*
+  * Upper bounds for the two loading-speed knobs below. Both are generous on
+@@ -195,6 +205,17 @@ int psx_mod_set_load_acceleration(uint32_t wall_clock_multiplier,
  int psx_mod_set_disc_speed(uint32_t divisor,
                             uint32_t instant_max_per_frame);
  
@@ -684,10 +783,19 @@ index a1e4645e..0a4c254d 100644
  enum {
      PSX_MOD_CONTROLLER_ANALOG = 1,
 diff --git a/runtime/include/mod_runtime.h b/runtime/include/mod_runtime.h
-index 20a3b847..bdafe6cb 100644
+index 20a3b847..4a8f26e5 100644
 --- a/runtime/include/mod_runtime.h
 +++ b/runtime/include/mod_runtime.h
-@@ -15,7 +15,8 @@ bool mod_runtime_initialize(const std::filesystem::path& root,
+@@ -5,6 +5,8 @@
+ #ifdef __cplusplus
+ #include <filesystem>
+ #include <string>
++#include <utility>
++#include <vector>
+ #if defined(RECOMP_LAUNCHER)
+ #include "recomp_launcher.h"
+ #endif
+@@ -15,7 +17,8 @@ bool mod_runtime_initialize(const std::filesystem::path& root,
                              const std::string& game_id,
                              uint32_t game_entry_pc,
                              const std::filesystem::path& exe_path = {},
@@ -697,6 +805,21 @@ index 20a3b847..bdafe6cb 100644
  bool mod_runtime_commit(const std::filesystem::path& disc_path = {},
                          std::string* error = nullptr);
  /* Drop the in-session mod plan for a netplay launch without rewriting the
+@@ -24,6 +27,14 @@ bool mod_runtime_commit(const std::filesystem::path& disc_path = {},
+ bool mod_runtime_clear_for_netplay(std::string* error = nullptr);
+ const std::string& mod_runtime_fingerprint();
+ const std::filesystem::path& mod_runtime_effective_disc_path();
++/* Save one feature's enabled flag and option values to the mod state file
++ * without re-resolving this session's plan (presentation features whose live
++ * effect the caller applies itself, such as in-game CRT hotkeys). */
++bool mod_runtime_persist_feature(
++    const std::string& package_id, const std::string& feature_id,
++    bool enabled,
++    const std::vector<std::pair<std::string, std::string>>& values,
++    std::string* error = nullptr);
+ 
+ #if defined(RECOMP_LAUNCHER)
+ const ::RecompLauncherCModProvider* mod_runtime_launcher_provider();
 diff --git a/runtime/include/psx_cyc.h b/runtime/include/psx_cyc.h
 index 4239c123..48c183fd 100644
 --- a/runtime/include/psx_cyc.h
@@ -714,10 +837,10 @@ index 4239c123..48c183fd 100644
      if (__builtin_expect(g_ls_replay_active | g_event_step_conservative, 0)) {
  #else
 diff --git a/runtime/include/psx_cycles.h b/runtime/include/psx_cycles.h
-index 25ba1f3b..3de59220 100644
+index 25ba1f3b..988a3745 100644
 --- a/runtime/include/psx_cycles.h
 +++ b/runtime/include/psx_cycles.h
-@@ -66,6 +66,41 @@ extern int g_psx_cyc_bb_defer;
+@@ -66,6 +66,45 @@ extern int g_psx_cyc_bb_defer;
   * via psx_cyc_local_publish / psx_cyc_batch_flush before IRQ/MMIO barriers. */
  extern uint32_t *g_psx_cyc_local_acc;
  
@@ -739,6 +862,10 @@ index 25ba1f3b..3de59220 100644
 + * short-circuits to one predictable compare on this hot path. */
 +void     psx_set_cpu_overclock(uint32_t percent);   /* 100 = stock */
 +uint32_t psx_get_cpu_overclock(void);
++/* Hold the CPU at stock speed (1) or return to the selected overclock (0).
++ * Used while an FMV plays; psx_get_cpu_overclock keeps reporting the
++ * selection. */
++void     psx_cpu_overclock_hold(int hold);
 +/* Scaled advance for CPU work; the overlay-DLL advance_cycles callback, whose
 + * pending total is only ever CPU charges. */
 +void     psx_advance_cpu_cycles(uint32_t cycles);
@@ -789,6 +916,18 @@ index 31bf7b96..2f3fd9af 100644
  
  /* ---- Per-voice register snapshot. Mirrors the fields the Beetle oracle
   * exposes via PS_SPU::GetRegister(GSREG_V0_*) so both backends produce a
+diff --git a/runtime/runtime.cmake b/runtime/runtime.cmake
+index 96be1f85..bfcba91c 100644
+--- a/runtime/runtime.cmake
++++ b/runtime/runtime.cmake
+@@ -393,6 +393,7 @@ set(PSXRECOMP_RUNTIME_SOURCES
+     ${PSXRECOMP_ROOT}/runtime/src/mod_builtin_speed.c
+     ${PSXRECOMP_ROOT}/runtime/src/mod_builtin_pgxp.c
+     ${PSXRECOMP_ROOT}/runtime/src/mod_builtin_bezel.c
++    ${PSXRECOMP_ROOT}/runtime/src/mod_builtin_crt.c
+     ${PSXRECOMP_ROOT}/runtime/src/mod_packages.cpp
+     ${PSXRECOMP_ROOT}/runtime/src/mod_runtime.cpp
+     ${PSXRECOMP_ROOT}/runtime/src/psx_keybinds.c
 diff --git a/runtime/src/bios_hle.c b/runtime/src/bios_hle.c
 index 11a875f4..53d1a1ce 100644
 --- a/runtime/src/bios_hle.c
@@ -1212,10 +1351,18 @@ index 3df0fa5f..7839e34e 100644
  
  #ifdef _WIN32
 diff --git a/runtime/src/gpu.c b/runtime/src/gpu.c
-index 8d91f79a..dcff801f 100644
+index 8d91f79a..e3545f3c 100644
 --- a/runtime/src/gpu.c
 +++ b/runtime/src/gpu.c
-@@ -2020,18 +2020,15 @@ static int32_t ws_disp_h(void) {
+@@ -30,6 +30,7 @@
+ #include "ws_aspect_cone_math.h"
+ #include "ws_ui_group.h"
+ #include "ws_prepass_guard.h"
++#include "psx_cycles.h"   /* psx_cpu_overclock_hold */
+ #include <stdint.h>
+ #include <stdio.h>
+ #include <stdlib.h>
+@@ -2020,18 +2021,15 @@ static int32_t ws_disp_h(void) {
      return di.height ? (int32_t)di.height : 240;
  }
  
@@ -1243,7 +1390,7 @@ index 8d91f79a..dcff801f 100644
  
  /* In-game HUD pivot for an untagged screen-space SPRT spanning [x, x+w).
   * Only reached during gameplay (ws_active true). HUD elements are sparse and
-@@ -2326,7 +2323,42 @@ static int      s_d24_present_hold = 0; /* vblanks to skip Swap after GP1(07h) *
+@@ -2326,7 +2324,42 @@ static int      s_d24_present_hold = 0; /* vblanks to skip Swap after GP1(07h) *
  static uint32_t s_d24_prev_disp_h = 0;  /* last GP1(07h) band height */
  static void depth24_note_upload(uint32_t x, uint32_t w);
  
@@ -1286,7 +1433,7 @@ index 8d91f79a..dcff801f 100644
      for (uint32_t row = 0; row < vram_write_h; row++)
          for (uint32_t col = 0; col < vram_write_w; col++)
              vram_write_pixels[row * vram_write_w + col] =
-@@ -2486,6 +2518,37 @@ static int ws_is_fb_base(uint32_t bx) {
+@@ -2486,6 +2519,37 @@ static int ws_is_fb_base(uint32_t bx) {
      return 0;
  }
  
@@ -1324,7 +1471,7 @@ index 8d91f79a..dcff801f 100644
  static void split_trace_reset(GpuVerticalSplitTrace *trace) {
      memset(trace, 0, sizeof(*trace));
  }
-@@ -2560,8 +2623,18 @@ static void ws_nw_sync_target(void) {
+@@ -2560,8 +2624,18 @@ static void ws_nw_sync_target(void) {
          return;
      }
      uint32_t base = draw_area_left;
@@ -1345,7 +1492,18 @@ index 8d91f79a..dcff801f 100644
  }
  
  static void ws_clear_all_reveal_margins(void) {
-@@ -3658,8 +3731,9 @@ static void gp0_exec_mono_quad(void) {
+@@ -3007,6 +3081,10 @@ void gpu_vblank_tick(void) {
+     }
+     split_trace_reset(&split_trace_this);
+     gpustat_poll_count = 0;
++    /* Local patch (AzureDreamsRecomp): stock CPU speed while an FMV plays (see
++     * psx_cpu_overclock_hold). Same colour-decode hysteresis as the widescreen
++     * FMV pin, so it lets go about half a second after the movie ends. */
++    psx_cpu_overclock_hold(mdec_recently_active(WS_FMV_HYSTERESIS));
+     /* Trusted package-selected plugins run on guest VBlank, independent of
+      * host presentation, pacing, turbo, or skipped frames. */
+     mod_runtime_on_vblank();
+@@ -3658,8 +3736,9 @@ static void gp0_exec_mono_quad(void) {
      /* Full-screen filters are commonly encoded as an axis-aligned quad. Drawing
       * a semi-transparent quad as two independent triangles blends their shared
       * diagonal twice; render the equivalent rectangle once to avoid that seam.
@@ -1357,7 +1515,7 @@ index 8d91f79a..dcff801f 100644
      if (vx[0] == vx[2] && vx[1] == vx[3] &&
          vy[0] == vy[1] && vy[2] == vy[3] &&
          vx[1] > vx[0] && vy[2] > vy[0] &&
-@@ -3669,7 +3743,6 @@ static void gp0_exec_mono_quad(void) {
+@@ -3669,7 +3748,6 @@ static void gp0_exec_mono_quad(void) {
          int32_t y = vy[0];
          int w = (int)(vx[1] - vx[0]);
          int h = (int)(vy[2] - vy[0]);
@@ -1365,7 +1523,7 @@ index 8d91f79a..dcff801f 100644
          x += draw_offset_x;
          y += draw_offset_y;
          gr_set_semi_transparency(semi_trans, (int)semi_transparency);
-@@ -4116,7 +4189,6 @@ static void gp0_exec_mono_rect(void) {
+@@ -4116,7 +4194,6 @@ static void gp0_exec_mono_rect(void) {
      int h = (gp0_cmd_buf[2] >> 16) & 0xFFFFu;
      if (w > 1023) w = 1023;
      if (h > 511)  h = 511;
@@ -1373,7 +1531,7 @@ index 8d91f79a..dcff801f 100644
      /* Same auto_ui squash the textured rect path gets. Without it a flat
       * -coloured HUD mark keeps its 4:3 X while the textured primitives of the
       * same widget move toward their anchor, so at a wide aspect it is left
-@@ -4349,8 +4421,7 @@ static void gp0_exec_draw_area_tl(void) {
+@@ -4349,8 +4426,7 @@ static void gp0_exec_draw_area_tl(void) {
      draw_area_left = param & 0x3FF;
      draw_area_top  = (param >> 10) & 0x3FF;
      split_trace_note_draw_area();
@@ -1383,7 +1541,7 @@ index 8d91f79a..dcff801f 100644
      ws_nw_sync_target();  /* back buffer (draw_area_left) → wide mirror surface */
  }
  
-@@ -4362,8 +4433,7 @@ static void gp0_exec_draw_area_br(void) {
+@@ -4362,8 +4438,7 @@ static void gp0_exec_draw_area_br(void) {
      draw_area_right  = param & 0x3FF;
      draw_area_bottom = (param >> 10) & 0x3FF;
      split_trace_note_draw_area();
@@ -1393,7 +1551,7 @@ index 8d91f79a..dcff801f 100644
      ws_nw_sync_target();  /* back buffer (draw_area_left) → wide mirror surface */
  }
  
-@@ -4496,6 +4566,7 @@ static void gp0_exec_cpu_to_vram(void) {
+@@ -4496,6 +4571,7 @@ static void gp0_exec_cpu_to_vram(void) {
          a0_capture_slot = slot;
      }
  
@@ -1401,7 +1559,7 @@ index 8d91f79a..dcff801f 100644
      vram_write_col = 0;
      vram_write_row = 0;
  
-@@ -5418,10 +5489,19 @@ static void gpu_write_gp0_body(uint32_t val) {
+@@ -5418,10 +5494,19 @@ static void gpu_write_gp0_body(uint32_t val) {
              uint16_t wx = (vram_write_x + vram_write_col) % 1024;
              uint16_t wy = (vram_write_y + vram_write_row) % 512;
  
@@ -1421,7 +1579,7 @@ index 8d91f79a..dcff801f 100644
                  goto next_pixel;
              }
  
-@@ -5939,8 +6019,7 @@ int gpu_snapshot_read(const uint8_t *p, uint32_t len) {
+@@ -5939,8 +6024,7 @@ int gpu_snapshot_read(const uint8_t *p, uint32_t len) {
      if (!gpu_snap_parse(&r)) return 0;
      /* Sync renderer clip/scissor to restored GP0(E3/E4); vars alone leave GL
       * on a stale draw area after savestate load. */
@@ -1432,10 +1590,25 @@ index 8d91f79a..dcff801f 100644
      return 1;
  }
 diff --git a/runtime/src/gpu_gl_renderer.c b/runtime/src/gpu_gl_renderer.c
-index 3312551e..27697e88 100644
+index 3312551e..95368168 100644
 --- a/runtime/src/gpu_gl_renderer.c
 +++ b/runtime/src/gpu_gl_renderer.c
-@@ -513,6 +513,11 @@ static int    g_wide_w        = 0;           /* wide width (native px); 0 = disa
+@@ -333,6 +333,14 @@ static GLint         s_interp_uAlpha = -1, s_interp_uUvRect = -1;
+ static GLint         s_interp_uBlendMode = -1;
+ static GLint         s_interp_uScanline = -1, s_interp_uScanStrength = -1;
+ static GLint         s_interp_uScanLines = -1, s_interp_uScanScale = -1;
++/* Soft-composite post-process state (see gl_renderer_set_composite). Same
++ * exactly-once rule as the scanlines: only game-content draws enable it. */
++static int           s_composite_on = 0;
++static float         s_composite_strength = 1.0f;
++static GLint         s_present_uComposite = -1, s_present_uCompPx = -1;
++static GLint         s_present_uCompStrength = -1;
++static GLint         s_interp_uComposite = -1, s_interp_uCompPx = -1;
++static GLint         s_interp_uCompStrength = -1;
+ static int           s_interp_enabled = 0, s_interp_valid = 0;
+ static int           s_interp_suspended = 0;
+ static int           s_interp_blend_mode = 0;
+@@ -513,6 +521,11 @@ static int    g_wide_w        = 0;           /* wide width (native px); 0 = disa
  static int    g_wide_off      = 0;           /* centering OFFSET (native px) */
  static GLuint g_wide_cur      = 0;           /* active mirror FBO (0 = no mirror) */
  static int    g_wide_cur_base = 0;           /* base_x of g_wide_cur */
@@ -1447,7 +1620,94 @@ index 3312551e..27697e88 100644
  /* Set by gpu_flat_rect for the full-screen-overlay case so the generic
   * gpu_geometry wide mirror is skipped and the flat path emits its own
   * full-wide-width pass instead (mirrors sw_draw_flat_rect). */
-@@ -1606,7 +1611,16 @@ static void wide_target_begin(int dx, GLint uXoff, GLint uXhalf) {
+@@ -908,6 +921,37 @@ static const char *PRESENT_VS =
+     "  float mult = 1.0 - (u_scanline_strength * gate) * (1.0 - beam);\n" \
+     "  return rgb * mult;\n" \
+     "}\n"
++/* Soft-composite post-process (host display enhancement), shared by the present
++ * and interpolation shaders. Models the horizontal bandwidth limit of a
++ * composite video cable: the signal is split into YIQ, luma gets a narrow
++ * Gaussian and chroma a much wider one, so edges stay readable while colour
++ * bleeds sideways. The kernel is measured in PS1 pixels (u_composite_px is one
++ * PS1 pixel in v_uv units), so it tracks the console's pixel grid, not the
++ * internal SSAA scale or the window size. Taps clamp to [lo,hi] so they never
++ * read VRAM outside the displayed rect. Vertical resolution is untouched. */
++#define PSX_COMPOSITE_UNIFORMS \
++    "uniform int   u_composite;\n" \
++    "uniform float u_composite_px;\n" \
++    "uniform float u_composite_strength;\n"
++#define PSX_COMPOSITE_FUNC \
++    "vec3 psx_composite(sampler2D tex, vec2 uv, float lo, float hi){\n" \
++    "  float sl = 0.45 * u_composite_strength;\n" \
++    "  float sc = 1.30 * u_composite_strength;\n" \
++    "  float y = 0.0, wl = 0.0, wc = 0.0; vec2 iq = vec2(0.0);\n" \
++    "  for (int i = -5; i <= 5; i++) {\n" \
++    "    float o = float(i) * 0.5;\n" \
++    "    vec3 c = texture(tex, vec2(clamp(uv.x + o * u_composite_px, lo, hi), uv.y)).rgb;\n" \
++    "    float a = exp(-0.5 * o * o / (sl * sl));\n" \
++    "    float b = exp(-0.5 * o * o / (sc * sc));\n" \
++    "    y  += dot(c, vec3(0.299, 0.587, 0.114)) * a; wl += a;\n" \
++    "    iq += vec2(dot(c, vec3(0.596, -0.274, -0.322)),\n" \
++    "               dot(c, vec3(0.211, -0.523,  0.312))) * b; wc += b;\n" \
++    "  }\n" \
++    "  y /= wl; iq /= wc;\n" \
++    "  return clamp(vec3(y + 0.956 * iq.x + 0.621 * iq.y,\n" \
++    "                    y - 0.272 * iq.x - 0.647 * iq.y,\n" \
++    "                    y - 1.106 * iq.x + 1.703 * iq.y), 0.0, 1.0);\n" \
++    "}\n"
+ static const char *PRESENT_FS =
+     "#version 330\n"
+     "in vec2 v_uv; uniform sampler2D u_tex; out vec4 frag;\n"
+@@ -916,6 +960,7 @@ static const char *PRESENT_FS =
+     "uniform vec2 u_sharp_scale;\n"
+     "uniform int  u_sharp;\n"
+     PSX_SCANLINE_UNIFORMS
++    PSX_COMPOSITE_UNIFORMS
+     /* Catmull-Rom bicubic via 9 bilinear taps. Sharper than plain bilinear at
+      * the same smoothness, with mild overshoot that reads as edge definition.
+      * The present texture holds exactly the source rect and wraps CLAMP_TO_EDGE,
+@@ -945,6 +990,7 @@ static const char *PRESENT_FS =
+     "  return r;\n"
+     "}\n"
+     PSX_SCANLINE_FUNC
++    PSX_COMPOSITE_FUNC
+     "void main(){\n"
+     "  vec2 uv = v_uv;\n"
+     "  vec4 c;\n"
+@@ -964,6 +1010,11 @@ static const char *PRESENT_FS =
+     "    }\n"
+     "    c = texture(u_tex, uv);\n"
+     "  }\n"
++    /* The composite kernel replaces the reconstruction filter: it is a
++     * deliberate blur, so the sharp/bicubic sample above only supplies alpha. */
++    "  if (u_composite == 1)\n"
++    "    c.rgb = psx_composite(u_tex, v_uv, min(u_uv_rect.x, u_uv_rect.z),\n"
++    "                          max(u_uv_rect.x, u_uv_rect.z));\n"
+     "  c.rgb = psx_scanline(c.rgb, v_uv.y);\n"
+     "  frag = c;\n"
+     "}\n";
+@@ -973,6 +1024,8 @@ static const char *INTERP_FS =
+     "uniform float u_alpha; uniform int u_blend_mode; out vec4 frag;\n"
+     PSX_SCANLINE_UNIFORMS
+     PSX_SCANLINE_FUNC
++    PSX_COMPOSITE_UNIFORMS
++    PSX_COMPOSITE_FUNC
+     "void main(){\n"
+     "  vec4 prev=texture(u_prev,v_uv), curr=texture(u_curr,v_uv);\n"
+     "  float alpha=u_alpha;\n"
+@@ -983,6 +1036,11 @@ static const char *INTERP_FS =
+     "    alpha=mix(step(0.5,u_alpha),u_alpha,safe_blend);\n"
+     "  }\n"
+     "  vec4 c=mix(prev,curr,alpha);\n"
++    /* Interp textures hold exactly the display rect, so the clamp range is the
++     * whole texture. alpha was chosen from the raw samples above. */
++    "  if(u_composite==1)\n"
++    "    c.rgb=mix(psx_composite(u_prev,v_uv,0.0,1.0),\n"
++    "              psx_composite(u_curr,v_uv,0.0,1.0),alpha);\n"
+     "  c.rgb=psx_scanline(c.rgb, v_uv.y);\n"
+     "  frag=c;\n"
+     "}\n";
+@@ -1606,7 +1664,16 @@ static void wide_target_begin(int dx, GLint uXoff, GLint uXhalf) {
          if (sy < 0) { sh += sy; sy = 0; }
          if (sy + sh > VRAM_H) sh = VRAM_H - sy;
          if (sh < 0) sh = 0;
@@ -1465,7 +1725,7 @@ index 3312551e..27697e88 100644
      }
      p_glUniform1f(uXoff, (float)dx);
      p_glUniform1f(uXhalf, (float)g_wide_w / 2.0f);
-@@ -2481,6 +2495,20 @@ static int depth24_is_fb_transfer(int x, int y, int w, int h) {
+@@ -2481,6 +2548,20 @@ static int depth24_is_fb_transfer(int x, int y, int w, int h) {
   * full-VRAM savestate restage so texture pages stay in the FBO while the
   * RGB888 movie band is still wiped when GP1 leaves 24-bit (avoids MotK
   * rainbow/static from treating packed RGB as 1555). */
@@ -1486,7 +1746,7 @@ index 3312551e..27697e88 100644
  static void depth24_mark_scanout_band(void) {
      GpuDisplayInfo di;
      int fb_w, fb_h, x0, y0, x1, y1;
-@@ -2507,6 +2535,7 @@ static void depth24_clear_skipped_fb(void) {
+@@ -2507,6 +2588,7 @@ static void depth24_clear_skipped_fb(void) {
      int x1 = s_d24_skip_fb.x1, y1 = s_d24_skip_fb.y1;
      int rw = x1 - x0 + 1, rh = y1 - y0 + 1;
      int S = s_scale;
@@ -1494,7 +1754,7 @@ index 3312551e..27697e88 100644
      p_glBindFramebuffer(PSXGL_FRAMEBUFFER, s_hr_fbo);
      glDisable(GL_BLEND);
      glDisable(GL_STENCIL_TEST);
-@@ -2544,10 +2573,21 @@ static void depth24_upload_policy(void) {
+@@ -2544,10 +2626,21 @@ static void depth24_upload_policy(void) {
           * top/bottom bars and flicker between double-buffered movie frames.
           * Cost is one full-VRAM readback per 24-bit entry, not per frame, and
           * ensure_cpu is a no-op when the FBO is already clean. */
@@ -1516,7 +1776,7 @@ index 3312551e..27697e88 100644
          /* Small texture uploads are still queued while depth24 scanout uses
           * the CPU mirror. Clear only the skipped movie band first, then land
           * those newer uploads so texture pages which overlap that band win in
-@@ -2587,7 +2627,7 @@ static void glb_vram_transfer_in(int x,int y,int w,int h,const uint16_t *d){
+@@ -2587,7 +2680,7 @@ static void glb_vram_transfer_in(int x,int y,int w,int h,const uint16_t *d){
              return;
          }
          depth24_mark_scanout_band();
@@ -1525,7 +1785,96 @@ index 3312551e..27697e88 100644
          return;
      }
      up_add_transfer(x, y, w, h);   /* exact touched rects, incl. per-pixel wrap */
-@@ -3391,13 +3431,29 @@ static void glb_wide_set_target(int base_x) {
+@@ -2667,14 +2760,35 @@ static void present_set_scanline(GLint uOn, GLint uStr, GLint uLines,
+     if (uLines >= 0) p_glUniform1f(uLines, (float)pitch_lines);
+     if (uScale >= 0) p_glUniform1f(uScale, (float)out_h / (float)disp_lines);
+ }
+-#define PRESENT_SCANLINE(pitch, disp, oh)                                   \
+-    present_set_scanline(s_present_uScanline, s_present_uScanStrength,      \
+-                         s_present_uScanLines, s_present_uScanScale,        \
+-                         (pitch), (disp), (oh))
+-#define INTERP_SCANLINE(pitch, disp, oh)                                    \
+-    present_set_scanline(s_interp_uScanline, s_interp_uScanStrength,        \
+-                         s_interp_uScanLines, s_interp_uScanScale,          \
+-                         (pitch), (disp), (oh))
++/* Composite companion to present_set_scanline. pitch_cols is the WIDTH of the
++ * texture that v_uv is normalized against, in PS1 pixels (one source texel
++ * column is one PS1 pixel, the same convention as pitch_lines). <= 0 forces the
++ * effect off for OSD, bezel and the already-composed hold-last drawable. */
++static void present_set_composite(GLint uOn, GLint uPx, GLint uStr,
++                                  int pitch_cols) {
++    if (uOn < 0) return;
++    int on = (s_composite_on && pitch_cols > 0) ? 1 : 0;
++    p_glUniform1i(uOn, on);
++    if (!on) return;
++    if (uPx >= 0)  p_glUniform1f(uPx, 1.0f / (float)pitch_cols);
++    if (uStr >= 0) p_glUniform1f(uStr, s_composite_strength);
++}
++#define PRESENT_SCANLINE(cols, pitch, disp, oh)                             \
++    do {                                                                    \
++        present_set_scanline(s_present_uScanline, s_present_uScanStrength,  \
++                             s_present_uScanLines, s_present_uScanScale,    \
++                             (pitch), (disp), (oh));                        \
++        present_set_composite(s_present_uComposite, s_present_uCompPx,      \
++                              s_present_uCompStrength, (cols));             \
++    } while (0)
++#define INTERP_SCANLINE(cols, pitch, disp, oh)                              \
++    do {                                                                    \
++        present_set_scanline(s_interp_uScanline, s_interp_uScanStrength,    \
++                             s_interp_uScanLines, s_interp_uScanScale,      \
++                             (pitch), (disp), (oh));                        \
++        present_set_composite(s_interp_uComposite, s_interp_uCompPx,        \
++                              s_interp_uCompStrength, (cols));              \
++    } while (0)
+ 
+ /* Display aspect for the present letterbox. Default 4:3 (native). When a wide
+  * aspect is configured the 4:3 frame is stretched into it — paired with the
+@@ -2697,6 +2811,16 @@ void gl_renderer_set_scanlines(int on, float strength) {
+     s_scanline_strength = strength;
+ }
+ 
++/* Soft-composite toggle (host display setting). strength scales the luma and
++ * chroma blur widths, 0.25..2 (1 = a typical composite cable). Applied per-draw
++ * in the present/interpolation shaders — see PSX_COMPOSITE_FUNC. */
++void gl_renderer_set_composite(int on, float strength) {
++    s_composite_on = on ? 1 : 0;
++    if (strength < 0.25f) strength = 0.25f;
++    if (strength > 2.f) strength = 2.f;
++    s_composite_strength = strength;
++}
++
+ int gl_renderer_get_scanlines(float *strength) {
+     if (strength) *strength = s_scanline_strength;
+     return s_scanline_on;
+@@ -2978,6 +3102,18 @@ int gl_renderer_init_context(SDL_Window *win) {
+                 p_glGetUniformLocation(s_interp_prog, "u_scanline_lines");
+             s_interp_uScanScale =
+                 p_glGetUniformLocation(s_interp_prog, "u_scanline_scale");
++            s_present_uComposite =
++                p_glGetUniformLocation(s_present_prog, "u_composite");
++            s_present_uCompPx =
++                p_glGetUniformLocation(s_present_prog, "u_composite_px");
++            s_present_uCompStrength =
++                p_glGetUniformLocation(s_present_prog, "u_composite_strength");
++            s_interp_uComposite =
++                p_glGetUniformLocation(s_interp_prog, "u_composite");
++            s_interp_uCompPx =
++                p_glGetUniformLocation(s_interp_prog, "u_composite_px");
++            s_interp_uCompStrength =
++                p_glGetUniformLocation(s_interp_prog, "u_composite_strength");
+             s_interp_uPrev = p_glGetUniformLocation(s_interp_prog, "u_prev");
+             s_interp_uCurr = p_glGetUniformLocation(s_interp_prog, "u_curr");
+             s_interp_uAlpha = p_glGetUniformLocation(s_interp_prog, "u_alpha");
+@@ -3107,7 +3243,7 @@ void gl_renderer_present(const uint32_t *pixels, int src_w, int src_h, int linea
+     present_set_sharp(filt_mode, src_w, src_h, lw, lh);
+     /* CPU present texture holds exactly the display rect, so v_uv spans it and
+      * pitch == display height == src_h. */
+-    PRESENT_SCANLINE(src_h, src_h, lh);
++    PRESENT_SCANLINE(src_w, src_h, src_h, lh);
+     if (crop) {
+         /* Cropped present keeps left-aligned content; still inset so linear
+          * AA does not blend the cut column with undefined border texels. */
+@@ -3391,13 +3527,29 @@ static void glb_wide_set_target(int base_x) {
      if (!s_raster_ok) { g_wide_cur = 0; return; }
      double t0 = cw_ms(); s_cw_wide_sets++;
      flush_tex_batch();   /* drain into the OLD target before switching */
@@ -1556,7 +1905,43 @@ index 3312551e..27697e88 100644
  
  /* Mirror a framebuffer clear: fill the full wide width over [y, y+h) of the
   * surface for base_x, so the revealed margins are clean. Mirrors sw_wide_clear:
-@@ -4501,6 +4557,7 @@ static const GpuRenderBackend GL_BACKEND = {
+@@ -3936,7 +4088,7 @@ static void interp_draw_quad(float alpha, int lx, int ly, int lw, int lh) {
+     p_glUniform4f(s_interp_uUvRect, 0.f, 0.f, 1.f, 1.f);
+     /* Interp textures hold exactly the display rect (uv_rect is 0..1), so pitch
+      * == display height == s_interp_h. */
+-    INTERP_SCANLINE(s_interp_h, s_interp_h, lh);
++    INTERP_SCANLINE(s_interp_w, s_interp_h, s_interp_h, lh);
+     p_glBindVertexArray(s_present_vao);
+     glDrawArrays(GL_TRIANGLES, 0, 3);
+     p_glBindVertexArray(0);
+@@ -4063,7 +4215,7 @@ static void gl_draw_osd_image(const uint32_t *px, int ow, int oh,
+     p_glUseProgram(s_present_prog);
+     p_glUniform1i(s_present_uTex, 0);
+     present_set_sharp(0, 0, 0, 0, 0);   /* OSD is authored at output res */
+-    PRESENT_SCANLINE(0, 0, 0);          /* never scanline the host OSD */
++    PRESENT_SCANLINE(0, 0, 0, 0);       /* never scanline the host OSD */
+     /* Host OSD bitmaps are top-down (row 0 = top), same as guest CPU
+      * present with v_flip=1: uv (0,0)-(1,1). (0,1)-(1,0) was the hold-last
+      * cancel for already-oriented captures and made toasts upside-down. */
+@@ -4172,7 +4324,7 @@ static void present_target_quad(GLuint tex, int tex_w, int tex_h,
+      * the phase pitch; h is the displayed line count for the output-scale gate.
+      * v_flip=0 is the already-composed hold-last drawable (scanlines, if any,
+      * are already baked) — skip it. */
+-    PRESENT_SCANLINE(v_flip ? tex_h : 0, v_flip ? h : 0, lh);
++    PRESENT_SCANLINE(v_flip ? tex_w : 0, v_flip ? tex_h : 0, v_flip ? h : 0, lh);
+     /* Half-texel inset: with GL_LINEAR, corner-mapped UVs make the outermost
+      * dest pixels blend the border texel with VRAM outside the content rect
+      * (visible edge stripe with AA on). Center-mapped UVs keep edge samples
+@@ -4237,7 +4389,7 @@ static void present_bezel(int ww, int wh, int lx, int ly, int lw, int lh) {
+     p_glUseProgram(s_present_prog);
+     p_glUniform1i(s_present_uTex, 0);
+     p_glUniform4f(s_present_uUvRect, 0.0f, 0.0f, 1.0f, 1.0f);
+-    PRESENT_SCANLINE(0, 0, 0);          /* bezel art is not scanlined */
++    PRESENT_SCANLINE(0, 0, 0, 0);       /* bezel art is not scanlined */
+     p_glBindVertexArray(s_present_vao);
+     glDrawArrays(GL_TRIANGLES, 0, 3);
+     p_glBindVertexArray(0);
+@@ -4501,6 +4653,7 @@ static const GpuRenderBackend GL_BACKEND = {
      .wide_clear_margins = glb_wide_clear_margins,
      .render_wide_display = glb_render_wide_display,
      .wide_dump_full = glb_wide_dump_full,
@@ -1622,7 +2007,7 @@ index 848309e2..7eb04344 100644
      return 0;
  }
 diff --git a/runtime/src/main.cpp b/runtime/src/main.cpp
-index 022b1baa..45599039 100644
+index 022b1baa..322b8d7e 100644
 --- a/runtime/src/main.cpp
 +++ b/runtime/src/main.cpp
 @@ -1,4 +1,4 @@
@@ -1673,7 +2058,103 @@ index 022b1baa..45599039 100644
                          uint8_t *img = (uint8_t *)std::malloc(img_len);
                          if (img) {
                              memcpy(img, file + 2048, img_len);
-@@ -1536,6 +1547,19 @@ extern "C" int psx_mod_set_disc_speed(
+@@ -1493,6 +1504,95 @@ extern "C" int psx_mod_set_bezel_artwork(const char* path) {
+     return 1;
+ }
+ 
++/* CRT filter (framework presentation mod psx.presentation.crt). The plugin sets
++ * the starting look at activation; the F6 hotkey family then adjusts it live
++ * and saves the choice back to the mod state so the launcher and the next
++ * session agree. Scanline darkness is the depth of the dark gap (percent);
++ * softness maps 0..100% onto the composite blur-width scale 0.25..2 (about 40%
++ * is a typical composite cable). Scanline globals are pushed to the renderer
++ * again right after plugin activation; composite goes straight to it. */
++#define CRT_PKG "psx.presentation.crt"
++static bool g_crt_composite = false;
++static int  g_crt_scan_pct = 30;
++static int  g_crt_soft_pct = 40;
++
++static void crt_apply(void) {
++    g_video_scanline_strength = (float)g_crt_scan_pct / 100.0f;
++    gl_renderer_set_scanlines(g_video_scanlines ? 1 : 0,
++                              g_video_scanline_strength);
++    gl_renderer_set_composite(g_crt_composite ? 1 : 0,
++                              0.25f + 1.75f * (float)g_crt_soft_pct / 100.0f);
++}
++
++static const char* crt_look_id(void) {
++    if (g_video_scanlines && g_crt_composite) return "composite-scanlines";
++    if (g_crt_composite) return "composite";
++    return "scanlines";
++}
++
++static void crt_persist(void) {
++    const bool on = g_video_scanlines || g_crt_composite;
++    (void)PSXRecompV4::mod_runtime_persist_feature(
++        CRT_PKG, "crt", on,
++        { { "look", crt_look_id() },
++          { "scanline_strength", std::to_string(g_crt_scan_pct) },
++          { "softness", std::to_string(g_crt_soft_pct) } });
++}
++
++extern "C" int psx_mod_set_crt_filter(int scanlines, int composite,
++                                      uint32_t scanline_pct,
++                                      uint32_t softness_pct) {
++    if (scanline_pct > 100 || softness_pct > 100) return 0;
++    g_video_scanlines = scanlines ? true : false;
++    g_crt_composite = composite ? true : false;
++    g_crt_scan_pct = (int)scanline_pct;
++    g_crt_soft_pct = (int)softness_pct;
++    crt_apply();
++    return 1;
++}
++
++/* F6 cycles Off -> Scanlines -> Soft composite -> both; Shift+F6 steps the
++ * scanline darkness and Ctrl+F6 the softness through 10..100% (wrapping),
++ * switching that effect on if it was off. Matched against the Scanlines bind
++ * with the modifier removed, so a rebound key keeps all three. */
++static bool crt_hotkey(int key, int scancode, int mod) {
++    const int shift = mod & KMOD_SHIFT, ctrl = mod & KMOD_CTRL;
++    const int base = mod & ~(KMOD_SHIFT | KMOD_CTRL);
++    char msg[64];
++    if (host_keymap_match_event(HOST_KEYMAP_SCANLINES, key, scancode, mod)) {
++        /* bit 0 = scanlines, bit 1 = composite: 0 off, 1 scan, 2 comp, 3 both */
++        const int look = (g_video_scanlines ? 1 : 0) | (g_crt_composite ? 2 : 0);
++        const int next = (look + 1) % 4;
++        g_video_scanlines = (next & 1) != 0;
++        g_crt_composite = (next & 2) != 0;
++        static const char* kName[4] = { "CRT filter off", "Scanlines",
++                                        "Soft composite",
++                                        "Soft composite + scanlines" };
++        std::snprintf(msg, sizeof(msg), "%s", kName[next]);
++    } else if (shift && !ctrl &&
++               host_keymap_match_event(HOST_KEYMAP_SCANLINES, key, scancode,
++                                       base)) {
++        g_crt_scan_pct = g_crt_scan_pct >= 100 ? 10
++                       : ((g_crt_scan_pct / 10) + 1) * 10;
++        g_video_scanlines = true;
++        std::snprintf(msg, sizeof(msg), "Scanline darkness %d%%",
++                      g_crt_scan_pct);
++    } else if (ctrl && !shift &&
++               host_keymap_match_event(HOST_KEYMAP_SCANLINES, key, scancode,
++                                       base)) {
++        g_crt_soft_pct = g_crt_soft_pct >= 100 ? 10
++                       : ((g_crt_soft_pct / 10) + 1) * 10;
++        g_crt_composite = true;
++        std::snprintf(msg, sizeof(msg), "Softness %d%%", g_crt_soft_pct);
++    } else {
++        return false;
++    }
++    crt_apply();
++    crt_persist();
++    host_osd_push(msg, 1500);
++    return true;
++}
++
+ extern "C" int psx_mod_set_load_acceleration(
+     uint32_t wall_clock_multiplier, uint32_t release_frames) {
+     /* Host pacing only changes how fast wall-clock time is fed to a load; every
+@@ -1536,6 +1636,19 @@ extern "C" int psx_mod_set_disc_speed(
      return 1;
  }
  
@@ -1693,7 +2174,7 @@ index 022b1baa..45599039 100644
  extern "C" int psx_mod_set_controller_mode_override(
      uint32_t player, uint32_t controller_mode) {
      if (player >= PSX_MAX_PLAYERS ||
-@@ -1621,6 +1645,17 @@ static void clamp_window_aspect(int* w, int* h, int num, int den) {
+@@ -1621,6 +1734,17 @@ static void clamp_window_aspect(int* w, int* h, int num, int den) {
      *h = width * den / num;
  }
  
@@ -1711,7 +2192,7 @@ index 022b1baa..45599039 100644
  static int aspect_gcd(int a, int b) {
      while (b) { int t = a % b; a = b; b = t; }
      return a > 0 ? a : 1;
-@@ -2048,6 +2083,13 @@ uint64_t g_turbo_loads_frames  = 0;   /* vblanks run unpaced (observability) */
+@@ -2048,6 +2172,13 @@ uint64_t g_turbo_loads_frames  = 0;   /* vblanks run unpaced (observability) */
  int      g_turbo_audio_sink_enabled = 0;
  int      g_turbo_audio_sink_active = 0;
  uint64_t g_turbo_audio_sink_frames = 0; /* guest SPU frames advanced, not queued */
@@ -1725,7 +2206,7 @@ index 022b1baa..45599039 100644
  }
  static int g_turbo_audio_sink_config_enabled = 0;
  /* The CD predicate already excludes XA and holds across ordinary inter-file
-@@ -2058,6 +2100,24 @@ static int g_turbo_audio_sink_config_enabled = 0;
+@@ -2058,6 +2189,24 @@ static int g_turbo_audio_sink_config_enabled = 0;
   * advancing normally. */
  #define TURBO_LOADS_ENGAGE_FRAMES  4
  #define TURBO_LOADS_RELEASE_FRAMES 6
@@ -1750,7 +2231,7 @@ index 022b1baa..45599039 100644
  /* Zero multiplier retains the historical uncapped turbo behavior. */
  static int g_turbo_load_wall_multiplier = 0;
  static int g_turbo_load_release_frames = TURBO_LOADS_RELEASE_FRAMES;
-@@ -2180,6 +2240,18 @@ static std::filesystem::path sidecar_cfg_path(const char* argv0, const char* fil
+@@ -2180,6 +2329,18 @@ static std::filesystem::path sidecar_cfg_path(const char* argv0, const char* fil
      return exe_dir_from_argv(argv0) / filename;
  }
  
@@ -1769,7 +2250,7 @@ index 022b1baa..45599039 100644
  static std::filesystem::path read_cached_path(const char* argv0, const char* filename) {
      std::ifstream f(sidecar_cfg_path(argv0, filename));
      if (!f.is_open()) return {};
-@@ -6562,6 +6634,12 @@ static NetplayVblankEpilogue sdl_vblank_present_body(void) {
+@@ -6562,6 +6723,12 @@ static NetplayVblankEpilogue sdl_vblank_present_body(void) {
                  psx_crash_trace_set_exit_origin("sdl_window_close");
                  shutdown_runtime();
                  std::exit(0);
@@ -1782,7 +2263,25 @@ index 022b1baa..45599039 100644
              } else if (ev.type == SDL_CONTROLLERDEVICEADDED) {
                  refresh_player_devices();
              } else if (ev.type == SDL_CONTROLLERDEVICEREMOVED) {
-@@ -6653,6 +6731,20 @@ static NetplayVblankEpilogue sdl_vblank_present_body(void) {
+@@ -6616,15 +6783,8 @@ static NetplayVblankEpilogue sdl_vblank_present_body(void) {
+                     fps_telemetry_toggle();
+                 }
+                 else if (!key_repeat &&
+-                         host_keymap_match_event(HOST_KEYMAP_SCANLINES,
+-                                                 (int)key, (int)scancode,
+-                                                 (int)mod)) {
+-                    psx_video_set_scanlines(g_video_scanlines ? 0 : 1,
+-                                            g_video_scanline_strength);
+-                    char msg[48];
+-                    std::snprintf(msg, sizeof(msg), "Scanlines %s",
+-                                  g_video_scanlines ? "on" : "off");
+-                    host_osd_push(msg, 1200);
++                         crt_hotkey((int)key, (int)scancode, (int)mod)) {
++                    /* CRT filter look / darkness / softness (see crt_hotkey). */
+                 }
+                 /* Host volume: config.ini [KeyMap] VolumeUp/VolumeDown
+                  * (defaults: keypad +/-). 5% steps; shows right-side bar. */
+@@ -6653,6 +6813,20 @@ static NetplayVblankEpilogue sdl_vblank_present_body(void) {
                                     SDL_WINDOW_FULLSCREEN;
                      if (is_fs) {
                          SDL_SetWindowFullscreen(sdl_window, 0);
@@ -1803,7 +2302,7 @@ index 022b1baa..45599039 100644
                          host_osd_push("Windowed", 1500);
                      } else {
                          /* If the configured mode is "off", the hotkey still
-@@ -6739,8 +6831,30 @@ static NetplayVblankEpilogue sdl_vblank_present_body(void) {
+@@ -6739,8 +6913,30 @@ static NetplayVblankEpilogue sdl_vblank_present_body(void) {
  
      /* Turbo-active test shared by the pacing/present gate below. */
      int turbo_loads_active = 0;
@@ -1836,7 +2335,7 @@ index 022b1baa..45599039 100644
      int load_run_value = 0;
      static int load_run = 0;
      static int release_run = 0;
-@@ -6768,6 +6882,44 @@ static NetplayVblankEpilogue sdl_vblank_present_body(void) {
+@@ -6768,6 +6964,44 @@ static NetplayVblankEpilogue sdl_vblank_present_body(void) {
          load_run = 0;
          release_run = 0;
      }
@@ -1881,7 +2380,7 @@ index 022b1baa..45599039 100644
      /* HLE boot-skip window: from reset until the game entry PC first
       * dispatches, run unpaced so the (shell-skipped) BIOS kernel init +
       * SYSTEM.CNF + game EXE load compress to host speed. This replaces the
-@@ -11045,7 +11197,8 @@ int main(int argc, char** argv) {
+@@ -11045,7 +11279,8 @@ int main(int argc, char** argv) {
       *   --debug-port <n>    override the TCP debug-server port (multi-instance)
       *   --memcard-dir <path> override card/save/options state (multi-instance)
       *   --renderer <name>   override the renderer: software|opengl|vulkan
@@ -1891,7 +2390,7 @@ index 022b1baa..45599039 100644
       *   --no-launcher       skip the GUI launcher (boot straight in)
       *   --headless          skip SDL window/audio; use TCP screenshots/state
       *   --netplay           enable delay-sync LAN (also PSX_NETPLAY=1)
-@@ -11075,6 +11228,20 @@ int main(int argc, char** argv) {
+@@ -11075,6 +11310,20 @@ int main(int argc, char** argv) {
              if      (std::strcmp(r, "software") == 0) cli_renderer = 0;
              else if (std::strcmp(r, "opengl")   == 0) cli_renderer = 1;
              else if (std::strcmp(r, "vulkan")   == 0) cli_renderer = 2;
@@ -1912,7 +2411,7 @@ index 022b1baa..45599039 100644
          } else if (std::strcmp(argv[i], "--window-title") == 0 && i + 1 < argc) {
              cli_window_title = argv[++i];
          } else if (std::strcmp(argv[i], "--launcher") == 0) {
-@@ -11693,7 +11860,10 @@ int main(int argc, char** argv) {
+@@ -11693,7 +11942,10 @@ int main(int argc, char** argv) {
      bool user_settings_has_renderer = false;
      {
          std::filesystem::path settings_path =
@@ -1924,7 +2423,7 @@ index 022b1baa..45599039 100644
  #if defined(RECOMP_LAUNCHER)
          g_lnch_settings_path = settings_path;
  #endif
-@@ -12024,14 +12194,17 @@ int main(int argc, char** argv) {
+@@ -12024,14 +12276,17 @@ int main(int argc, char** argv) {
          }
      }
  
@@ -1946,7 +2445,7 @@ index 022b1baa..45599039 100644
              std::fprintf(stderr, "psxrecomp: mods unavailable: %s\n",
                           mod_error.c_str());
          }
-@@ -13070,9 +13243,9 @@ int main(int argc, char** argv) {
+@@ -13070,9 +13325,9 @@ int main(int argc, char** argv) {
                      if (seed.has_deadzone) resolved_deadzone = seed.deadzone;
                  }
                  g_video_win_w = seed.window_width;
@@ -1958,7 +2457,7 @@ index 022b1baa..45599039 100644
              }
          }
      }
-@@ -13138,8 +13311,11 @@ int main(int argc, char** argv) {
+@@ -13138,8 +13393,11 @@ int main(int argc, char** argv) {
          /* Fast Loading advances the guest at a host rate greater than real
           * time. Keep the canonical SPU/CD stream running, but discard the
           * accelerated presentation-side audio until pacing resumes; otherwise
@@ -1972,7 +2471,7 @@ index 022b1baa..45599039 100644
          if (g_turbo_load_wall_multiplier) {
              std::fprintf(stdout,
                  "psxrecomp: mod selected %dx load acceleration "
-@@ -13356,9 +13532,16 @@ session_reboot:
+@@ -13356,9 +13614,16 @@ session_reboot:
          g_video_perspective_texturing = (*e && *e != '0') ? 1 : 0;
      if (const char* e = std::getenv("PSX_PGXP_CPU_MODE"))
          g_video_pgxp_cpu_mode = (*e && *e != '0') ? 1 : 0;
@@ -1992,7 +2491,7 @@ index 022b1baa..45599039 100644
      pgxp_set_tolerance(g_video_pgxp_tolerance);
      /* Scanlines: env override wins over config, same as the corrections above,
       * so a headless/free-run boot can be captured with the effect armed from the
-@@ -14724,7 +14907,7 @@ soft_return_lobby:
+@@ -14724,7 +14989,7 @@ soft_return_lobby:
               * the rest of settings.toml — merge into the on-disk file. */
              {
                  const auto settings_path =
@@ -2014,6 +2513,56 @@ index 75f08675..e9de8a01 100644
      cpu->ld_which_t = (uint8_t)arm_rt;
      /* PROOF GATE (PSX_POLL_PROOF=N, default 0/off): a FLAT, non-absorbed extra N
       * cycles per main-RAM data read — replicates the historical "+6 cyc/main-RAM
+diff --git a/runtime/src/mod_builtin_crt.c b/runtime/src/mod_builtin_crt.c
+new file mode 100644
+index 00000000..5fcdd5a2
+--- /dev/null
++++ b/runtime/src/mod_builtin_crt.c
+@@ -0,0 +1,44 @@
++/*
++ * Framework-owned CRT filter presentation mod.
++ *
++ * The renderer owns the effects (scanlines, soft composite); this trusted
++ * plugin only turns the player's launcher choice into a renderer setting. The
++ * Scanlines hotkey family (F6, Shift+F6, Ctrl+F6) adjusts the same settings in
++ * game and saves them back. With the feature off, the historical scanline
++ * setting (settings.toml / F6) is left exactly as it was and composite stays
++ * off.
++ */
++#include "mod_plugins.h"
++
++#include <stdlib.h>
++#include <string.h>
++
++#define PKG_CRT "psx.presentation.crt"
++
++static unsigned crt_percent(const char* id, unsigned fallback) {
++    char text[16] = "";
++    if (!psx_mod_option_value(PKG_CRT, "crt", id, text, sizeof text) ||
++        !text[0])
++        return fallback;
++    char* end = NULL;
++    const long value = strtol(text, &end, 10);
++    if (!end || *end != '\0' || value < 0 || value > 100) return fallback;
++    return (unsigned)value;
++}
++
++static void builtin_crt_activate(void) {
++    char look[32] = "";
++    if (!psx_mod_option_value(PKG_CRT, "crt", "look", look, sizeof look))
++        strcpy(look, "scanlines");
++    const int scanlines = strcmp(look, "scanlines") == 0 ||
++                          strcmp(look, "composite-scanlines") == 0;
++    const int composite = strcmp(look, "composite") == 0 ||
++                          strcmp(look, "composite-scanlines") == 0;
++    (void)psx_mod_set_crt_filter(scanlines, composite,
++                                 crt_percent("scanline_strength", 30),
++                                 crt_percent("softness", 40));
++}
++
++PSX_MOD_CONSTRUCTOR(psx_register_builtin_crt_plugin) {
++    (void)psx_mod_register_activation_plugin("psx.crt", builtin_crt_activate);
++}
 diff --git a/runtime/src/mod_builtin_speed.c b/runtime/src/mod_builtin_speed.c
 index c48dceea..b04d90af 100644
 --- a/runtime/src/mod_builtin_speed.c
@@ -2096,7 +2645,7 @@ index 150a5a3d..eb00b5f3 100644
      if (!out) {
          set_error(error, "cannot write " + temp.string());
 diff --git a/runtime/src/mod_runtime.cpp b/runtime/src/mod_runtime.cpp
-index 3f8b5765..a1337605 100644
+index 3f8b5765..95626d35 100644
 --- a/runtime/src/mod_runtime.cpp
 +++ b/runtime/src/mod_runtime.cpp
 @@ -1097,7 +1097,8 @@ bool mod_runtime_initialize(const std::filesystem::path& root,
@@ -2117,6 +2666,36 @@ index 3f8b5765..a1337605 100644
      s.game_id = game_id;
      s.entry_phys = game_entry_pc & 0x1FFFFFFFu;
      if (!s.manager.scan(&s.error) || !s.manager.load_state(&s.error)) {
+@@ -1218,6 +1220,29 @@ const std::string& mod_runtime_fingerprint() {
+     return state().plan.fingerprint;
+ }
+ 
++bool mod_runtime_persist_feature(
++    const std::string& package_id, const std::string& feature_id,
++    bool enabled,
++    const std::vector<std::pair<std::string, std::string>>& values,
++    std::string* error) {
++    /* Writes the selection only. The committed plan for this session is not
++     * re-resolved, so this is for presentation features whose live state the
++     * caller has already applied itself (e.g. in-game hotkeys); the saved
++     * choice is what the launcher shows and the next session activates. */
++    RuntimeMods& s = state();
++    std::string err;
++    bool ok = s.manager.set_feature_enabled(package_id, feature_id, enabled,
++                                            &err);
++    for (const auto& [option_id, value] : values) {
++        if (!ok) break;
++        ok = s.manager.set_feature_option(package_id, feature_id, option_id,
++                                          value, &err);
++    }
++    if (ok) ok = s.manager.save_state(&err);
++    if (!ok && error) *error = err;
++    return ok;
++}
++
+ const std::filesystem::path& mod_runtime_effective_disc_path() {
+     return state().effective_disc_path;
+ }
 diff --git a/runtime/src/overlay_loader.c b/runtime/src/overlay_loader.c
 index a2b32480..f654ec9e 100644
 --- a/runtime/src/overlay_loader.c
@@ -2134,10 +2713,10 @@ index a2b32480..f654ec9e 100644
      s_callbacks.psx_syscall          = psx_syscall;
      s_callbacks.psx_native_bad_entry = psx_native_bad_entry;
 diff --git a/runtime/src/psx_cycles.c b/runtime/src/psx_cycles.c
-index 1057093f..d9302138 100644
+index 1057093f..7ebd9def 100644
 --- a/runtime/src/psx_cycles.c
 +++ b/runtime/src/psx_cycles.c
-@@ -25,6 +25,31 @@ uint32_t g_psx_cyc_batch = 0;
+@@ -25,6 +25,51 @@ uint32_t g_psx_cyc_batch = 0;
  uint32_t g_psx_cyc_batch_limit = 0;
  int      g_psx_cyc_bb_defer = 0;
  uint32_t *g_psx_cyc_local_acc = NULL;
@@ -2150,16 +2729,36 @@ index 1057093f..d9302138 100644
 + * it assumes it has. Ceiling 1000: beyond that most instructions charge 0 for
 + * long runs, and upstream measured a boot that never enables the display at
 + * 10x, so higher is not a useful promise. */
++/* The selected speed, kept apart from the live scale so a movie hold (below)
++ * can drop to stock and come back to it. */
++static uint32_t s_oc_selected_q16 = 65536u;
++static int      s_oc_held = 0;
++
 +void psx_set_cpu_overclock(uint32_t percent) {
 +    if (percent < 100u)  percent = 100u;
 +    if (percent > 1000u) percent = 1000u;
-+    g_psx_oc_scale_q16 = (uint32_t)((65536ull * 100ull) / (uint64_t)percent);
++    s_oc_selected_q16 = (uint32_t)((65536ull * 100ull) / (uint64_t)percent);
++    if (!s_oc_held) g_psx_oc_scale_q16 = s_oc_selected_q16;
 +    g_psx_oc_accum = 0u;
 +}
 +
 +uint32_t psx_get_cpu_overclock(void) {
-+    return (uint32_t)((65536ull * 100ull + g_psx_oc_scale_q16 / 2u) /
-+                      (uint64_t)g_psx_oc_scale_q16);
++    return (uint32_t)((65536ull * 100ull + s_oc_selected_q16 / 2u) /
++                      (uint64_t)s_oc_selected_q16);
++}
++
++/* Local patch (AzureDreamsRecomp): run at stock speed while an FMV plays.
++ * Movie playback is paced by the CD and MDEC, not by CPU budget, so an
++ * overclock gains nothing there; the extra budget is spent spinning in the
++ * player's wait loops, and on a slower host that host-side cost is what made
++ * movies drop below full speed. Driven once per guest VBlank from the colour
++ * MDEC decode age (guest cycles), so it is deterministic. */
++void psx_cpu_overclock_hold(int hold) {
++    hold = hold ? 1 : 0;
++    if (hold == s_oc_held) return;
++    s_oc_held = hold;
++    g_psx_oc_scale_q16 = hold ? 65536u : s_oc_selected_q16;
++    g_psx_oc_accum = 0u;
 +}
 +
 +void psx_advance_cpu_cycles(uint32_t cycles) {
@@ -2169,7 +2768,7 @@ index 1057093f..d9302138 100644
  static int      s_cycle_replay_active = 0;
  static uint64_t s_cycle_replay_live = 0;
  
-@@ -674,7 +699,7 @@ uint32_t psx_mult_latency_u(uint32_t rs) {  /* MULTU (unsigned) */
+@@ -674,7 +719,7 @@ uint32_t psx_mult_latency_u(uint32_t rs) {  /* MULTU (unsigned) */
  /* DIV/DIVU latency is the fixed constant 37 — emitted directly at the op site. */
  
  void psx_muldiv_set(CPUState* cpu, uint32_t latency) {
@@ -2178,7 +2777,7 @@ index 1057093f..d9302138 100644
  }
  
  void psx_muldiv_stall(CPUState* cpu) {
-@@ -764,7 +789,7 @@ void psx_gte_set(CPUState* cpu, uint32_t latency) {
+@@ -764,7 +809,7 @@ void psx_gte_set(CPUState* cpu, uint32_t latency) {
      if (cpu->gte_ts_done > psx_cycle_count) {
          psx_advance_cycles((uint32_t)(cpu->gte_ts_done - psx_cycle_count));
      }

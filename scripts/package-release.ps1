@@ -78,6 +78,19 @@ HOW TO PLAY
   Both modes share your memory-card saves (saves\) and controls. Each mode
   keeps its own settings in presets\hd\ or presets\original\.
 
+CRT FILTER (optional, off by default)
+  F6        cycles Off / Scanlines / Soft composite / both
+  Shift+F6  darker scanlines (steps of 10%, wraps back to 10%)
+  Ctrl+F6   softer picture   (steps of 10%, wraps back to 10%)
+  Your choice is saved for the mode you are playing. In the launcher it
+  is under Mods > CRT Filter, with exact sliders.
+
+PROBLEMS?
+  Please open an issue on GitHub with your CPU, graphics card, Windows
+  version, which mode you used (HD or Original), and the diagnostics\
+  folder next to the exe:
+  https://github.com/PotionDweller/Azure-Dreams-HD-Recompilation/issues
+
 UPDATING
   Copy the new files over this folder. Do not delete saves\ (your saves),
   disc.cfg (your disc choice) or presets\ (your settings).

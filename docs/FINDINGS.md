@@ -121,6 +121,15 @@ in town and in the tower; hooks check stock values before changing anything.
   rest of that load, so the music plays from its first note at real speed.
   Memory-card saves/loads keep full speed. `turbo_loads` lists recent loads
   (start frame, music key-on frame, end frame, accelerated frames).
+- **Movie cost (1.0.1):** a player reported FMV slowdown. Movies are CPU-heavy
+  on the host: on a Ryzen 9 7950X the intro FMV runs uncapped (TCP `turbo`) at
+  only ~127 fps stock and ~96 fps at the 150 % overclock, about 0.6–0.7 of a
+  core at normal speed, so a CPU around 60 % of that per-core speed fell below
+  60 fps in HD. Every dispatch is static (`dispatch_stats`: no misses). The
+  overclock gives the movie player nothing but a longer wait loop, so it now
+  drops to stock while a colour MDEC decode happened in the last 30 frames:
+  HD uncapped 96 → 126 fps. Why the movie path costs that much at stock is
+  still open (needs a profiler).
 
 ## Other facts
 
